@@ -1,5 +1,0 @@
-{
-  "name": "CryptoPriceFetcher.java",
-  "description": "Fetches the current price of a cryptocurrency by name or symbol using the Binance API and prints the result.",
-  "args": ["Cryptocurrency name or symbol (e.g., 'bitcoin' or 'BTC')"]
-}
