@@ -200,7 +200,7 @@ Iteration 3:  EXECUTE: WeatherTool.java "São Paulo"
 
 If the tool crashes (non-zero exit or `Exception in thread` on stdout), the error trace is fed back into the loop and the Coder Agent is instructed to fix it — **without any user intervention**.
 
-### The Four Agents
+### The Five Agents
 
 Each agent is a stateless `InMemoryRunner` wrapping a `LlmAgent` backed by Google Gemini. They share no memory — context is injected as text on every call.
 
@@ -260,6 +260,30 @@ When the Router decides no code is needed, the Assistant takes over. It receives
 - Any RAG context gathered by prior `SEARCH` commands
 
 It responds in clean Markdown, grounded in real data — not in stale training knowledge.
+
+#### Tester Agent — *The Validator*
+
+After every successful CREATE, the Tester generates a single safe test invocation and runs it immediately. No user interaction required.
+
+- **Pass** → pipeline continues normally to the final EXECUTE with the user's real arguments.
+- **Fail** → the error output becomes `state.lastError`; the Router issues `EDIT` on the next iteration to auto-heal before the tool ever reaches the user.
+
+Use `--skip-test` to bypass this step for tools that open GUI windows or require physical hardware.
+
+---
+
+### Code Validation
+
+Before any generated code is written to disk, JForge runs four fast structural checks:
+
+| Check | What it catches |
+|---|---|
+| Blank body | Coder returned an empty code block |
+| Missing `//DEPS` | JBang dependency directive absent |
+| Missing `class` / `void main` | Incomplete Java structure |
+| Leaked markdown fences | LLM ignored the no-markdown rule |
+
+If any check fails, the file is **never written**. `state.lastError` is set with a clear message and the Router retries with `EDIT` on the next iteration — without polluting the `tools/` directory with broken files.
 
 ---
 
@@ -340,6 +364,7 @@ jbang JForgeAgent.java [OPTIONS]
 | `--max-tools <n>` | `10` | Maximum cached tools before GC count-eviction |
 | `--tool-age-days <n>` | `30` | Days of inactivity before a tool is eligible for deletion |
 | `--prompt <text>` | — | Run a single prompt non-interactively and exit (CI/CD mode) |
+| `--skip-test` | `false` | Skip the auto-test after CREATE (use for GUI/Swing or hardware-dependent tools) |
 | `-V`, `--version` | — | Print version and exit |
 | `-h`, `--help` | — | Print help and exit |
 
@@ -656,6 +681,8 @@ What tools have you built for me so far?
 | `[LOOP GUARD] Maximum iterations reached` | Router is stuck in a SEARCH/CREATE cycle | Rephrase your prompt with more specific instructions |
 | Google Search quota reached | Too many rapid searches or API limit | Wait and try again, or check your API quota at Google AI Studio |
 | Tool compiles but produces wrong output | LLM logic error in generated code | Ask: *"The result was wrong. Fix [ToolName.java] to correctly handle [case]"* |
+| `[TEST FAILED] Tool failed validation` | Newly created tool crashed during auto-test | Auto-heal activates automatically (EDIT); use `--skip-test` to disable for GUI or hardware tools |
+| `[VALIDATION] Validation failed` | LLM generated malformed code (missing `//DEPS`, leaked markdown, etc.) | JForge retries automatically; if it persists, try rephrasing the prompt |
 
 ---
 

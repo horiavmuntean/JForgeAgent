@@ -72,6 +72,10 @@ public class JForgeAgent implements Callable<Integer> {
             "--prompt" }, description = "Run a single prompt non-interactively and exit (CI/CD/pipe mode)")
     private String promptFlag;
 
+    @CommandLine.Option(names = {
+            "--skip-test" }, description = "Skip automatic test after CREATE (use for GUI/Swing or hardware-dependent tools)", defaultValue = "false")
+    private boolean skipTest = false;
+
     private static final int MAX_MEMORY_ENTRIES = MAX_MEMORY_ENTRIES_CONST;
     private static final int MAX_HISTORY_CHARS = MAX_HISTORY_CHARS_CONST;
     private static final int MAX_LOOP_ITERATIONS = MAX_LOOP_ITERATIONS_CONST;
@@ -133,6 +137,7 @@ public class JForgeAgent implements Callable<Integer> {
     private Agent coder;
     private Agent assistant;
     private Agent searcher;
+    private Agent tester;
 
     // ==================== ENTRY POINT ====================
 
@@ -170,9 +175,10 @@ public class JForgeAgent implements Callable<Integer> {
         coder = new Agent("coder", defaultModel, CODER_INSTRUCTION);
         assistant = new Agent("assistant", defaultModel, ASSISTANT_INSTRUCTION);
         searcher = new Agent("searcher", defaultModel, SEARCHER_INSTRUCTION, new GoogleSearchTool());
+        tester = new Agent("tester", defaultModel, TESTER_INSTRUCTION);
 
         System.out.println(AUTO
-                .string("@|faint [LLM] Model: " + defaultModel + " | Agents: router, coder, assistant, searcher|@"));
+                .string("@|faint [LLM] Model: " + defaultModel + " | Agents: router, coder, assistant, searcher, tester|@"));
         if (promptFlag != null && !promptFlag.isBlank()) {
             printWelcome();
             runGarbageCollector();
@@ -456,30 +462,92 @@ public class JForgeAgent implements Callable<Integer> {
             existingCode = "Tool code unreadable/missing.";
         }
 
-        runCoderPipeline(coder.invoke(buildCoderEditPrompt(changes, existingCode, state.lastError)), state);
+        runCoderPipeline(coder.invoke(buildCoderEditPrompt(changes, existingCode, state.lastError)), state, false);
     }
 
     private void handleCreate(String instruction, LoopState state) {
         System.out.println(AUTO
                 .string("@|bold,magenta [CODER] Tool missing (or corrupted). Developing new Tool -> |@" + instruction));
-        runCoderPipeline(coder.invoke(buildCoderCreatePrompt(instruction, state.lastError)), state);
+        runCoderPipeline(coder.invoke(buildCoderCreatePrompt(instruction, state.lastError)), state, true);
     }
 
-    private void runCoderPipeline(String generatedCode, LoopState state) {
+    private void runCoderPipeline(String generatedCode, LoopState state, boolean isCreate) {
         if (generatedCode.isBlank()) {
             state.lastError = "Coder LLM returned empty response (API error). Retrying.";
             return;
         }
         try {
-            handleCodeGeneration(generatedCode);
+            String savedFileName = handleCodeGeneration(generatedCode);
             state.lastError = null;
             state.cacheList = null;
+            if (isCreate) {
+                handleTest(savedFileName, extractMetadataFromCode(generatedCode), state);
+            }
             runGarbageCollector();
         } catch (IOException e) {
             logToFile("[ERROR] handleCodeGeneration failed: " + e.getMessage());
             state.lastError = "Code generation I/O failure: " + e.getMessage();
         }
         System.out.println(AUTO.string("@|bold,yellow Returning control to [ROUTER] to invoke the produced tool...|@"));
+    }
+
+    /** Feature 9: Runs a Tester-agent-generated invocation immediately after CREATE.
+     *  On failure sets state.lastError + increments crashRetries for auto-heal via EDIT. */
+    private void handleTest(String fileName, String metadataContent, LoopState state) {
+        if (skipTest || state.crashRetries > 0) return;
+
+        System.out.println(AUTO.string("@|bold,cyan [TESTER] Generating test invocation for: |@" + fileName));
+        logToFile("[TESTER] Running auto-test for: " + fileName);
+
+        String toolSource;
+        try {
+            toolSource = Files.readString(TOOLS_DIR.resolve(fileName));
+        } catch (IOException e) {
+            logToFile("[TESTER] Could not read tool source — skipping test: " + e.getMessage());
+            return;
+        }
+
+        String testResponse = tester.invoke(
+                "Tool file: " + fileName + "\n\nMetadata:\n" + metadataContent + "\n\nSource code:\n" + toolSource);
+
+        if (testResponse.isBlank() || !testResponse.contains("TEST_INVOCATION:")) {
+            logToFile("[TESTER] Invalid response from tester agent — skipping test.");
+            return;
+        }
+
+        String invocation = testResponse.substring(testResponse.indexOf("TEST_INVOCATION:") + 16).trim();
+        String[] parts = invocation.split("\\s+");
+        if (parts.length == 0 || parts[0].isBlank()) {
+            logToFile("[TESTER] Empty invocation after parsing — skipping test.");
+            return;
+        }
+        String testToolName = parts[0];
+        if (!isToolNameSafe(testToolName)) {
+            logToFile("[TESTER] Unsafe tool name from tester agent '" + testToolName + "' — skipping test.");
+            return;
+        }
+        List<String> testArgs = Arrays.asList(Arrays.copyOfRange(parts, 1, parts.length));
+
+        ProcessResult testResult;
+        try {
+            testResult = executeToolProcess(testToolName, testArgs);
+        } catch (Exception e) {
+            logToFile("[TESTER] Test execution threw exception: " + e.getMessage());
+            state.lastError = "[AUTO-TEST EXCEPTION] " + e.getMessage();
+            state.crashRetries++;
+            return;
+        }
+
+        logToFile("[TESTER] Test result:\n" + testResult.output());
+        if (testResult.success()) {
+            System.out.println(AUTO.string("@|bold,green [TEST PASSED] Tool validated successfully.|@"));
+            logToFile("[TESTER] Test PASSED for: " + fileName);
+        } else {
+            System.out.println(AUTO.string("@|bold,red [TEST FAILED] Tool failed validation. Routing for auto-heal...|@"));
+            state.lastError = "[AUTO-TEST FAILED]\n" + testResult.output();
+            state.crashRetries++;
+            logToFile("[TESTER] Test FAILED for: " + fileName + "\nError: " + testResult.output());
+        }
     }
 
     private void handleExecute(String routerAction, int actionColon, String userPrompt, LoopState state)
@@ -533,7 +601,7 @@ public class JForgeAgent implements Callable<Integer> {
         }
     }
 
-    private void handleCodeGeneration(String generatedCode) throws IOException {
+    private String handleCodeGeneration(String generatedCode) throws IOException {
         String code = generatedCode.replace("```java", "").replace("```json", "").replace("```", "").trim();
 
         String metadataContent = "";
@@ -559,6 +627,9 @@ public class JForgeAgent implements Callable<Integer> {
             throw new IOException("Rejected unsafe file name from LLM: '" + fileName + "'");
         }
 
+        // Feature 8: fast structural validation before writing to disk
+        validateCodeStructure(code, fileName);
+
         Files.writeString(TOOLS_DIR.resolve(fileName), code);
         logToFile("[SYSTEM] Forge saved script: " + fileName);
         System.out.println(AUTO.string("@|bold,green [Operation Successful] Script saved as: |@" + fileName));
@@ -569,6 +640,8 @@ public class JForgeAgent implements Callable<Integer> {
             System.out.println(AUTO.string("@|bold,green [Metadata] Schema generated and attached: |@" + metaFileName));
             logToFile("[SYSTEM] Metadata attached: " + metadataContent);
         }
+
+        return fileName; // Feature 9: caller needs this to invoke handleTest()
     }
 
     // ==================== AGENTS PROMPT BUILDERS ====================
@@ -632,6 +705,37 @@ public class JForgeAgent implements Callable<Integer> {
         if (Files.exists(resolved) && Files.isSymbolicLink(resolved))
             return false;
         return true;
+    }
+
+    /** Feature 8: fast structural checks on LLM-generated code before writing to disk.
+     *  Catches blank body, missing //DEPS, missing class/main, and leaked markdown fences. */
+    private void validateCodeStructure(String code, String fileName) throws IOException {
+        record Check(boolean fail, String msg) {}
+        for (var c : new Check[]{
+                new Check(code.isBlank(),
+                        "code body is blank after stripping metadata"),
+                new Check(!code.contains("//DEPS"),
+                        "missing //DEPS directive"),
+                new Check(!code.contains("class") || !code.contains("void main"),
+                        "missing 'class' or 'void main'"),
+                new Check(code.contains("```java") || code.contains("```"),
+                        "leaked markdown fences in generated code")
+        }) {
+            if (c.fail()) {
+                String msg = "Validation failed for '" + fileName + "': " + c.msg() + ".";
+                System.out.println(AUTO.string("@|bold,red [VALIDATION] |@" + msg));
+                logToFile("[VALIDATION FAILED] " + msg);
+                throw new IOException(msg);
+            }
+        }
+    }
+
+    /** Re-extracts the raw metadata JSON from the original LLM response string. */
+    private String extractMetadataFromCode(String generatedCode) {
+        String code = generatedCode.replace("```java", "").replace("```json", "").replace("```", "").trim();
+        int metaStart = code.indexOf("//METADATA_START");
+        int metaEnd   = code.indexOf("//METADATA_END");
+        return (metaStart != -1 && metaEnd != -1) ? code.substring(metaStart + 16, metaEnd).trim() : "";
     }
 
     private ProcessResult executeToolProcess(String toolName, List<String> scriptArgs)
@@ -857,6 +961,20 @@ public class JForgeAgent implements Callable<Integer> {
             3. Always include the source URL for any specific data point or API endpoint you report.
             4. Do NOT summarize tracker websites or dashboards as an answer — report the underlying API instead.
             5. Return plain text only. No markdown, no preamble, no commentary.
+            """;
+
+    private static final String TESTER_INSTRUCTION = """
+            You are a Test Case Generator for Java/JBang CLI tools.
+            You receive a tool's source code and its metadata JSON.
+            Your job: produce ONE safe test invocation that exercises the tool's main functionality.
+
+            Rules:
+            - Use only safe, realistic, harmless arguments (city names, public URLs, simple numbers).
+            - The test must be runnable without user interaction or side effects.
+            - Do NOT test error paths or edge cases.
+            - Output exactly ONE line in this format:
+              TEST_INVOCATION: ToolName.java arg1 arg2
+            - Output nothing else. No explanation. No markdown.
             """;
 
     // ==================== AGENTE ====================
