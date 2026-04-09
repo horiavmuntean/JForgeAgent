@@ -26,7 +26,7 @@ JForge is an **orchestration engine**: you describe what you want in plain Engli
    - [4. Clone & Run](#4-clone--run)
 3. [Architecture](#-architecture)
    - [The Orchestration Loop](#the-orchestration-loop)
-   - [The Four Agents](#the-four-agents)
+   - [The Five Agents](#the-five-agents)
    - [Workspace Layout](#workspace-layout)
    - [Safety & Security Layers](#safety--security-layers)
    - [Cognitive Garbage Collector](#cognitive-garbage-collector)
@@ -47,8 +47,15 @@ graph TD
     Router -- EDIT --> Coder
     Router -- EXECUTE --> JBang[JBang Engine]
     Router -- DELEGATE_CHAT --> Assistant[Assistant Agent]
-    
-    Coder -- "tools/*.java" --> JBang
+
+    Coder -- Generated Code --> Validate{Gate 1\nValidation}
+    Validate -- Invalid\nreject & retry --> Router
+    Validate -- Valid --> Save["tools/*.java"]
+    Save -- CREATE only --> Tester[Tester Agent]
+    Tester -- TEST PASSED --> JBang
+    Tester -- TEST FAILED\nauto-heal --> Router
+    Save -- EDIT --> JBang
+
     JBang -- Success --> Resolved([Task Resolved])
     JBang -- Failure --> Router
 ```
