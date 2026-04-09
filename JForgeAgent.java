@@ -178,7 +178,8 @@ public class JForgeAgent implements Callable<Integer> {
         tester = new Agent("tester", defaultModel, TESTER_INSTRUCTION);
 
         System.out.println(AUTO
-                .string("@|faint [LLM] Model: " + defaultModel + " | Agents: router, coder, assistant, searcher, tester|@"));
+                .string("@|faint [LLM] Model: " + defaultModel
+                        + " | Agents: router, coder, assistant, searcher, tester|@"));
         if (promptFlag != null && !promptFlag.isBlank()) {
             printWelcome();
             runGarbageCollector();
@@ -491,10 +492,14 @@ public class JForgeAgent implements Callable<Integer> {
         System.out.println(AUTO.string("@|bold,yellow Returning control to [ROUTER] to invoke the produced tool...|@"));
     }
 
-    /** Feature 9: Runs a Tester-agent-generated invocation immediately after CREATE.
-     *  On failure sets state.lastError + increments crashRetries for auto-heal via EDIT. */
+    /**
+     * Feature 9: Runs a Tester-agent-generated invocation immediately after CREATE.
+     * On failure sets state.lastError + increments crashRetries for auto-heal via
+     * EDIT.
+     */
     private void handleTest(String fileName, String metadataContent, LoopState state) {
-        if (skipTest || state.crashRetries > 0) return;
+        if (skipTest || state.crashRetries > 0)
+            return;
 
         System.out.println(AUTO.string("@|bold,cyan [TESTER] Generating test invocation for: |@" + fileName));
         logToFile("[TESTER] Running auto-test for: " + fileName);
@@ -543,7 +548,8 @@ public class JForgeAgent implements Callable<Integer> {
             System.out.println(AUTO.string("@|bold,green [TEST PASSED] Tool validated successfully.|@"));
             logToFile("[TESTER] Test PASSED for: " + fileName);
         } else {
-            System.out.println(AUTO.string("@|bold,red [TEST FAILED] Tool failed validation. Routing for auto-heal...|@"));
+            System.out.println(
+                    AUTO.string("@|bold,red [TEST FAILED] Tool failed validation. Routing for auto-heal...|@"));
             state.lastError = "[AUTO-TEST FAILED]\n" + testResult.output();
             state.crashRetries++;
             logToFile("[TESTER] Test FAILED for: " + fileName + "\nError: " + testResult.output());
@@ -585,7 +591,7 @@ public class JForgeAgent implements Callable<Integer> {
             state.taskResolved = true;
         } else {
             System.out.println(AUTO.string(
-                    "@|bold,red Tool Execution Failed (Exit non-zero). Returning trace for Systemic Auto-Healing...|@"));
+                    "@|bold,red Tool Execution Failed. Returning trace to Router for analysis...|@"));
             state.crashRetries++;
             if (state.crashRetries > 2) {
                 System.out.println(AUTO.string("@|bold,red Maximum retry limit reached (" + state.crashRetries
@@ -707,11 +713,16 @@ public class JForgeAgent implements Callable<Integer> {
         return true;
     }
 
-    /** Feature 8: fast structural checks on LLM-generated code before writing to disk.
-     *  Catches blank body, missing //DEPS, missing class/main, and leaked markdown fences. */
+    /**
+     * Feature 8: fast structural checks on LLM-generated code before writing to
+     * disk.
+     * Catches blank body, missing //DEPS, missing class/main, and leaked markdown
+     * fences.
+     */
     private void validateCodeStructure(String code, String fileName) throws IOException {
-        record Check(boolean fail, String msg) {}
-        for (var c : new Check[]{
+        record Check(boolean fail, String msg) {
+        }
+        for (var c : new Check[] {
                 new Check(code.isBlank(),
                         "code body is blank after stripping metadata"),
                 new Check(!code.contains("//DEPS"),
@@ -734,7 +745,7 @@ public class JForgeAgent implements Callable<Integer> {
     private String extractMetadataFromCode(String generatedCode) {
         String code = generatedCode.replace("```java", "").replace("```json", "").replace("```", "").trim();
         int metaStart = code.indexOf("//METADATA_START");
-        int metaEnd   = code.indexOf("//METADATA_END");
+        int metaEnd = code.indexOf("//METADATA_END");
         return (metaStart != -1 && metaEnd != -1) ? code.substring(metaStart + 16, metaEnd).trim() : "";
     }
 

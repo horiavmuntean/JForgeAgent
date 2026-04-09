@@ -629,7 +629,7 @@ Fetch the top 5 trending repositories from GitHub API without authentication
 --------[ RESULT ]--------
 Exception in thread "main" java.io.IOException: Server returned HTTP response code: 403
 ---------------------------
-Tool Execution Failed. Returning trace for Systemic Auto-Healing...
+Tool Execution Failed. Returning trace to Router for analysis...
 [ROUTER] Analyzing Intent...
 [CODER] Modifying existing tool -> GitHubTrending.java
         Fix: Add proper User-Agent header to bypass GitHub's anonymous request blocking
@@ -643,6 +643,55 @@ Demand successfully fulfilled via native JBang tool.
 ```
 
 No user intervention. The loop caught the 403, sent the stack trace back to the Coder, and the fix was applied in the same session.
+
+---
+
+### Code Validation & Auto-Test in Action (Features 8 & 9)
+
+Every new tool goes through two quality gates before reaching the user.
+
+**Gate 1 — Structural Validation (before writing to disk):**
+
+If the LLM generates malformed code, it is rejected before touching the filesystem:
+
+```
+[CODER] Developing new Tool -> WeatherFetcher.java
+[VALIDATION] Validation failed for 'WeatherFetcher.java': missing //DEPS directive.
+[ROUTER] Analyzing Intent...
+[CODER] Modifying existing tool -> WeatherFetcher.java
+[Operation Successful] Script saved as: WeatherFetcher.java
+```
+
+**Gate 2 — Auto-Test (right after saving):**
+
+The Tester agent generates a safe invocation and runs it immediately:
+
+```
+[CODER] Developing new Tool -> BinancePriceFetcher.java
+[Operation Successful] Script saved as: BinancePriceFetcher.java
+[TESTER] Generating test invocation for: BinancePriceFetcher.java
+----------------[ RESULT ]----------------
+Symbol: BTCUSDT
+Current Price: 71798.91000000
+------------------------------------------
+[TEST PASSED] Tool validated successfully.
+[ROUTER] Analyzing Intent...
+[EXECUTE] EXECUTE: BinancePriceFetcher.java SOL
+```
+
+If the auto-test fails, the error feeds back into the loop and triggers EDIT before the tool ever reaches the user:
+
+```
+[TEST FAILED] Tool failed validation. Routing for auto-heal...
+[ROUTER] Analyzing Intent...
+[CODER] Modifying existing tool -> BinancePriceFetcher.java
+        Fix: Handle non-200 HTTP responses explicitly
+[Operation Successful] Script saved as: BinancePriceFetcher.java
+[ROUTER] Analyzing Intent...
+[EXECUTE] EXECUTE: BinancePriceFetcher.java BTC
+```
+
+Use `--skip-test` to bypass Gate 2 for GUI/Swing tools or hardware-dependent scripts.
 
 ---
 
