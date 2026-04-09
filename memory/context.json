@@ -1,0 +1,21 @@
+Result Preview: [jbang] Building jar for SolanaPriceFetcher.java...
+Symbol: SOLUSDT
+Price: 82.21000000
+USER: create a tool that verifies current price of any cripto by receiving a argument (name)
+SYSTEM (CHAT): We already have a tool in your system that perfectly matches your request!   ### 🛠️ Available Tool: `CryptoPriceFetcher`  This existing tool fetches the current price of any cryptocurrency using the ...
+USER: whats the current price of etherium?
+SYSTEM (EXECUTED): EXECUTE: CryptoPriceFetcher.java ethereum
+Result Preview: [jbang] Building jar for CryptoPriceFetcher.java...
+The current price of ETHUSDT is $2172,2600
+USER: what about solana?
+SYSTEM (EXECUTED): EXECUTE: SolanaPriceFetcher.java
+Result Preview: Symbol: SOLUSDT
+Price: 82.19000000
+USER: what about btc?
+SYSTEM (EXECUTED): EXECUTE: BitcoinPriceFetcher.java
+Result Preview: Warning: Primary API (CoinDesk) failed. Reason: null
+Attempting fallback to Binance API...
+Current Bitcoin Price (USD) [Binance]: $71078.97000000
+USER: What is the current price of Bitcoin?
+SYSTEM (EXECUTED): EXECUTE: CryptoPriceFetcher.java bitcoin
+Result Preview: The current price of BTCUSDT is $71086,6700

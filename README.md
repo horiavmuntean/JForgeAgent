@@ -1,8 +1,18 @@
 # JForge Agent
 
-> **An autonomous, self-healing multi-agent system that writes, runs, and fixes Java tools on demand — powered by Google Gemini and JBang.**
+<p align="center">
+  <img src="https://img.shields.io/badge/Java-26-blue?style=flat-square&logo=openjdk&logoColor=white" alt="Java 26">
+  <img src="https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square" alt="License Apache 2.0">
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platform">
+</p>
 
-JForge is not a chatbot. It is an **orchestration engine**: you describe what you want in plain English, and JForge decides whether to forge a new Java tool from scratch, reuse a cached one, search the web for live data, or simply answer you conversationally. All of this happens in a tight, self-correcting loop — no human intervention required.
+<p align="center">
+  <strong>The self-evolving agent that builds its own toolbox on the fly.</strong>
+</p>
+
+---
+
+JForge is an **orchestration engine**: you describe what you want in plain English, and JForge decides whether to forge a new Java tool from scratch, reuse a cached one, search the web for live data, or simply answer you conversationally.
 
 ---
 
@@ -52,12 +62,14 @@ graph TD
 [SDKMAN](https://sdkman.io) is the easiest way to manage JDK versions on Linux, macOS, and Windows (WSL/Git Bash).
 
 **Install SDKMAN:**
+
 ```bash
 curl -s "https://get.sdkman.io" | bash
 source "$HOME/.sdkman/bin/sdkman-init.sh"
 ```
 
 **Install Java 26 (or the latest available):**
+
 ```bash
 # List available Java 26 builds
 sdk list java | grep "26"
@@ -82,21 +94,25 @@ java --version
 JBang lets you run `.java` files as if they were shell scripts — no `pom.xml`, no `build.gradle`, no compile step.
 
 **Linux / macOS / WSL:**
+
 ```bash
 curl -Ls https://sh.jbang.dev | bash -s - app setup
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 iex "& { $(iwr https://ps.jbang.dev) } app setup"
 ```
 
 **Via SDKMAN (recommended if you already have it):**
+
 ```bash
 sdk install jbang
 ```
 
 **Verify:**
+
 ```bash
 jbang --version
 # Expected: JBang v0.x.x
@@ -145,6 +161,7 @@ jbang .\JForgeAgent.java
 On first run, JBang will download all dependencies automatically (Google ADK, picocli, jsoup, slf4j). This takes ~30 seconds once — subsequent runs are instant.
 
 **Expected welcome screen:**
+
 ```
 Welcome to JForge V1.0 - Tool Orchestrator.
 Available tools are cached in: C:\...\tools
@@ -226,6 +243,7 @@ The Coder is explicitly instructed to **never swallow exceptions** — tools mus
 #### Searcher Agent — *The Researcher*
 
 The Searcher is equipped with the `GoogleSearchTool`. It performs the actual web queries when requested by the Router. It returns a structured plain-text report focusing on:
+
 - Technical API endpoints and documentation.
 - Factual data points and dates.
 - Direct sources and URLs for grounding.
@@ -235,6 +253,7 @@ This agent ensures that the system doesn't rely on hallucinations but on real-ti
 #### Assistant Agent — *The Communicator*
 
 When the Router decides no code is needed, the Assistant takes over. It receives:
+
 - Your original prompt
 - The current system clock
 - The list of available cached tools
@@ -325,6 +344,7 @@ jbang JForgeAgent.java [OPTIONS]
 | `-h`, `--help` | — | Print help and exit |
 
 **Examples:**
+
 ```bash
 # Use a faster model and keep up to 20 tools
 jbang .\JForgeAgent.java --model gemini-2.0-flash --max-tools 20
@@ -357,6 +377,7 @@ jbang JForgeAgent.java --model gemini-2.0-flash --prompt "List my Downloads fold
 ```
 
 When `--prompt` is provided, JForge:
+
 1. Initializes all agents normally
 2. Loads persistent memory from previous sessions
 3. Executes the prompt through the full orchestration loop (including tool creation, search, and auto-heal)
@@ -379,16 +400,19 @@ JForge always searches the web before answering time-sensitive questions — it 
 ```
 What is the current price of Bitcoin in USD?
 ```
+
 > Router → `SEARCH: "Bitcoin price USD today"` → `DELEGATE_CHAT` with RAG context injected
 
 ```
 Who won the last FIFA World Cup and what was the final score?
 ```
+
 > Router → `SEARCH: "FIFA World Cup latest winner final score"` → `DELEGATE_CHAT`
 
 ```
 What are the top 3 Java frameworks trending on GitHub right now?
 ```
+
 > Router → `SEARCH: "trending Java frameworks GitHub 2026"` → `DELEGATE_CHAT`
 
 ---
@@ -398,39 +422,51 @@ What are the top 3 Java frameworks trending on GitHub right now?
 These prompts trigger `CREATE` — JForge writes a `.java` file, saves it to `tools/`, and immediately executes it.
 
 **Weather checker:**
+
 ```
 Create a tool that fetches the current weather for any city using wttr.in
 ```
+
 > Creates `WeatherTool.java` → `EXECUTE: WeatherTool.java "London"`
 
 **Currency converter:**
+
 ```
 Build a currency converter that uses the Frankfurter API to convert amounts between any two currencies
 ```
+
 > Creates `CurrencyConverter.java` → `EXECUTE: CurrencyConverter.java 100 USD BRL`
 
 **File organizer:**
+
 ```
 Write a tool that scans a directory path I provide, groups all files by extension, and prints a summary table showing how many files and total size per type
 ```
+
 > Creates `FileSummarizer.java` → `EXECUTE: FileSummarizer.java "C:/Users/me/Downloads"`
 
 **GitHub PR lister:**
+
 ```
 Forge a script that uses the GitHub REST API to list all open pull requests for a given repository. I'll pass the owner and repo as arguments.
 ```
+
 > Creates `GitHubPRList.java` → `EXECUTE: GitHubPRList.java "octocat" "Hello-World"`
 
 **QR Code generator:**
+
 ```
 Create a tool using the ZXing library that generates a QR code PNG from any text I give it and saves it to the products folder
 ```
+
 > Creates `QRCodeGen.java` → `EXECUTE: QRCodeGen.java "https://github.com/my-project"` → saves `products/qrcode.png`
 
 **Math precision calculator:**
+
 ```
 Write a tool using the Apfloat library to calculate Pi to 1000 decimal places and save the result to a text file in products/
 ```
+
 > Creates `PiCalculator.java` → `EXECUTE: PiCalculator.java 1000`
 
 ---
@@ -442,16 +478,19 @@ Once a tool is cached, you can ask JForge to modify it in plain language.
 ```
 Update the weather tool to also show wind speed and humidity, not just temperature
 ```
+
 > Router → `EDIT: WeatherTool.java "Add wind speed and humidity to the output"`
 
 ```
 The currency converter only does one conversion. Make it accept a list of target currencies and show all at once
 ```
+
 > Router → `EDIT: CurrencyConverter.java "Accept multiple target currencies and display a table"`
 
 ```
 Add error handling to the GitHub PR tool so it prints a friendly message if the repository is not found instead of crashing
 ```
+
 > Router → `EDIT: GitHubPRList.java "Handle 404 responses gracefully"`
 
 ---
@@ -464,18 +503,21 @@ After a tool is built, you can invoke it again with minimal typing — the Route
 # After building WeatherTool.java earlier:
 What's the weather in Tokyo?
 ```
+
 > Router reads cache → `EXECUTE: WeatherTool.java "Tokyo"` — no rebuild needed
 
 ```
 # After building CurrencyConverter.java:
 How much is 500 EUR in JPY?
 ```
+
 > Router reads cache → `EXECUTE: CurrencyConverter.java 500 EUR JPY`
 
 ```
 # After building FileSummarizer.java:
 Summarize my Documents folder
 ```
+
 > Router reads cache → `EXECUTE: FileSummarizer.java "C:/Users/me/Documents"`
 
 ---
@@ -487,16 +529,19 @@ JForge can forge Swing/JavaFX applications and chart libraries — they open as 
 ```
 Build a Swing app that shows a live analog clock with the current local time, updating every second
 ```
+
 > Creates `AnalogClock.java` → `EXECUTE: AnalogClock.java` — opens a desktop window
 
 ```
 Create a bar chart using the XChart library that plots the monthly average temperature for São Paulo. Hardcode some example data.
 ```
+
 > Creates `TemperatureChart.java` → opens chart window
 
 ```
 Make a simple Swing file explorer that opens a folder picker dialog and displays the directory tree in a JTree
 ```
+
 > Creates `FileExplorer.java` → opens GUI
 
 ---
@@ -506,16 +551,19 @@ Make a simple Swing file explorer that opens a folder picker dialog and displays
 ```
 Find all .log files in C:/Projects that are older than 7 days and print their names and sizes
 ```
+
 > Creates `OldLogFinder.java` → `EXECUTE: OldLogFinder.java "C:/Projects" 7`
 
 ```
 Write a tool that reads a CSV file I point it at and prints the first 10 rows as a formatted table in the terminal
 ```
+
 > Creates `CsvPreview.java` → `EXECUTE: CsvPreview.java "C:/data/sales.csv"`
 
 ```
 Create a batch image renamer: given a folder path, rename all .jpg files to a sequential format like photo_001.jpg, photo_002.jpg, etc.
 ```
+
 > Creates `ImageRenamer.java` → `EXECUTE: ImageRenamer.java "C:/Photos/vacation"`
 
 ---
@@ -525,16 +573,19 @@ Create a batch image renamer: given a folder path, rename all .jpg files to a se
 ```
 Build a tool that pings a list of hostnames and reports which ones are reachable. I'll pass the hostnames as space-separated arguments.
 ```
+
 > Creates `HostPinger.java` → `EXECUTE: HostPinger.java google.com github.com api.example.com`
 
 ```
 Forge a script that downloads the HTML of any URL I give it and saves it as a .html file in the artifacts folder
 ```
+
 > Creates `HtmlDownloader.java` → `EXECUTE: HtmlDownloader.java "https://news.ycombinator.com"`
 
 ```
 Create a tool that queries the OpenMeteo free weather API (no key needed) and returns a 7-day temperature forecast for any city coordinates I provide
 ```
+
 > Searches OpenMeteo docs → Creates `ForecastTool.java` → `EXECUTE: ForecastTool.java -23.5 -46.6`
 
 ---
@@ -577,16 +628,19 @@ Not every request needs code. JForge recognizes when you're just talking.
 ```
 What's the difference between virtual threads and platform threads in Java 21+?
 ```
+
 > Router → `DELEGATE_CHAT` — detailed explanation with no tool created
 
 ```
 List 5 best practices for designing REST APIs
 ```
+
 > Router → `DELEGATE_CHAT` — formatted Markdown response
 
 ```
 What tools have you built for me so far?
 ```
+
 > Router → `DELEGATE_CHAT` — Assistant reads the cache list and describes each tool
 
 ---
