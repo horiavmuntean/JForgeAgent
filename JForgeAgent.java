@@ -418,6 +418,26 @@ public class JForgeAgent implements Callable<Integer> {
 
         String chatMessage = assistant
                 .invoke(buildAssistantPrompt(userPrompt, state.ragContext, state.cacheList, clock));
+
+        // ── GUARDRAIL: if the assistant mentions a real cached tool, redirect to EXECUTE ──
+        java.util.regex.Matcher m = SAFE_TOOL_NAME.matcher(chatMessage);
+        while (m.find()) {
+            String candidate = m.group();
+            if (isToolNameSafe(candidate) && Files.exists(TOOLS_DIR.resolve(candidate))) {
+                status("@|bold,yellow [GUARDRAIL] DELEGATE_CHAT mentioned '" + candidate
+                        + "' \u2014 overriding to EXECUTE|@");
+                logToFile("[GUARDRAIL] DELEGATE_CHAT referenced cached tool '" + candidate
+                        + "'. Redirecting loop to EXECUTE.");
+                state.ragContext = "ROUTING CORRECTION: The previous routing decision was wrong. "
+                        + "Tool '" + candidate + "' is cached and MUST be executed directly. "
+                        + "Respond with EXECUTE: " + candidate + " <args from user prompt>. "
+                        + "Do NOT use DELEGATE_CHAT.\n\n" + state.ragContext;
+                addToMemory("USER: " + userPrompt);
+                return; // skip display and taskResolved — loop will re-route to EXECUTE
+            }
+        }
+        // ── END GUARDRAIL ──
+
         resultBuffer.setLength(0);
         resultBuffer.append(chatMessage.strip());
         if (silent) {

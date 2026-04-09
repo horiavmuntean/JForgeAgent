@@ -758,6 +758,7 @@ What tools have you built for me so far?
 | Tool compiles but produces wrong output | LLM logic error in generated code | Ask: *"The result was wrong. Fix [ToolName.java] to correctly handle [case]"* |
 | `[TEST FAILED] Tool failed validation` | Newly created tool crashed during auto-test | Auto-heal activates automatically (EDIT); use `--skip-test` to disable for GUI or hardware tools |
 | `[VALIDATION] Validation failed` | LLM generated malformed code (missing `//DEPS`, leaked markdown, etc.) | JForge retries automatically; if it persists, try rephrasing the prompt |
+| `[GUARDRAIL] DELEGATE_CHAT mentioned 'X.java' — overriding to EXECUTE` | Router mis-routed to DELEGATE_CHAT when a cached tool should have been executed | Automatic — the guardrail detects the mis-route and forces re-routing to EXECUTE |
 
 ---
 
