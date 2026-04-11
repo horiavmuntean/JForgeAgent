@@ -475,9 +475,9 @@ jbang JForgeAgent.java [OPTIONS]
 | Option | Default | Description |
 |---|---|---|
 | `--model <model>` | — | Override Gemini model for **all** agents (disables per-agent defaults) |
-| `--supervisor-model` | `gemini-2.5-pro` | Model for the Supervisor agent |
-| `--router-model` | `gemini-2.5-pro` | Model for the Router agent |
-| `--coder-model` | `gemini-2.5-pro` | Model for the Coder agent |
+| `--supervisor-model` | `gemini-2.5-flash` | Model for the Supervisor agent |
+| `--router-model` | `gemini-2.5-flash` | Model for the Router agent |
+| `--coder-model` | `gemini-2.5-flash` | Model for the Coder agent |
 | `--assistant-model` | `gemini-2.5-flash` | Model for the Assistant agent |
 | `--searcher-model` | `gemini-2.5-flash` | Model for the Searcher agent |
 | `--tester-model` | `gemini-2.5-flash` | Model for the Tester agent |
@@ -489,7 +489,11 @@ jbang JForgeAgent.java [OPTIONS]
 | `-V`, `--version` | — | Print version and exit |
 | `-h`, `--help` | — | Print help and exit |
 
-By default, agents that require deep reasoning (Supervisor, Router, Coder) use `gemini-2.5-pro`, while agents with simpler tasks (Assistant, Searcher, Tester) use `gemini-2.5-flash`.
+By default, all agents use `gemini-2.5-flash` (free tier compatible). Users with billing enabled can upgrade the reasoning agents to `gemini-2.5-pro`:
+
+```bash
+jbang JForgeAgent.java --supervisor-model gemini-2.5-pro --router-model gemini-2.5-pro --coder-model gemini-2.5-pro
+```
 
 **Examples:**
 

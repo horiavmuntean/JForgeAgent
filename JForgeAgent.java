@@ -74,16 +74,16 @@ public class JForgeAgent implements Callable<Integer> {
     private String defaultModel = null;
 
     @CommandLine.Option(names = {
-            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
-    private String supervisorModel = "gemini-2.5-pro";
+            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-flash")
+    private String supervisorModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
-            "--router-model" }, description = "Model for Router agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
-    private String routerModel = "gemini-2.5-pro";
+            "--router-model" }, description = "Model for Router agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
+    private String routerModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
-            "--coder-model" }, description = "Model for Coder agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
-    private String coderModel = "gemini-2.5-pro";
+            "--coder-model" }, description = "Model for Coder agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
+    private String coderModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
             "--assistant-model" }, description = "Model for Assistant agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
