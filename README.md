@@ -474,7 +474,13 @@ jbang JForgeAgent.java [OPTIONS]
 
 | Option | Default | Description |
 |---|---|---|
-| `--model <model>` | `gemini-2.5-pro-preview` | Gemini model used by all six agents |
+| `--model <model>` | — | Override Gemini model for **all** agents (disables per-agent defaults) |
+| `--supervisor-model` | `gemini-2.5-pro-preview` | Model for the Supervisor agent |
+| `--router-model` | `gemini-2.5-pro-preview` | Model for the Router agent |
+| `--coder-model` | `gemini-2.5-pro-preview` | Model for the Coder agent |
+| `--assistant-model` | `gemini-2.0-flash` | Model for the Assistant agent |
+| `--searcher-model` | `gemini-2.0-flash` | Model for the Searcher agent |
+| `--tester-model` | `gemini-2.0-flash` | Model for the Tester agent |
 | `--max-tools <n>` | `10` | Maximum cached tools before GC count-eviction |
 | `--tool-age-days <n>` | `30` | Days of inactivity before a tool is eligible for deletion |
 | `--prompt <text>` | — | Run a single prompt non-interactively and exit (CI/CD mode) |
@@ -483,11 +489,19 @@ jbang JForgeAgent.java [OPTIONS]
 | `-V`, `--version` | — | Print version and exit |
 | `-h`, `--help` | — | Print help and exit |
 
+By default, agents that require deep reasoning (Supervisor, Router, Coder) use `gemini-2.5-pro-preview`, while agents with simpler tasks (Assistant, Searcher, Tester) use `gemini-2.0-flash`.
+
 **Examples:**
 
 ```bash
-# Use a faster model and keep up to 20 tools
-jbang JForgeAgent.java --model gemini-2.0-flash --max-tools 20
+# Default run — per-agent model assignment is automatic
+jbang JForgeAgent.java
+
+# Force all agents to use the same model (e.g. for testing)
+jbang JForgeAgent.java --model gemini-2.0-flash
+
+# Override only the Coder to a newer model, keep others as default
+jbang JForgeAgent.java --coder-model gemini-2.5-pro
 
 # Aggressive GC: delete tools unused for more than 7 days, keep max 5
 jbang JForgeAgent.java --tool-age-days 7 --max-tools 5

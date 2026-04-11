@@ -70,8 +70,32 @@ public class JForgeAgent implements Callable<Integer> {
     // ==================== CLI OPTIONS ====================
 
     @CommandLine.Option(names = {
-            "--model" }, description = "Gemini model to use (default: gemini-3-pro-preview)", defaultValue = "gemini-3-pro-preview")
-    private String defaultModel = "gemini-3-pro-preview";
+            "--model" }, description = "Override Gemini model for ALL agents (disables per-agent defaults)")
+    private String defaultModel = null;
+
+    @CommandLine.Option(names = {
+            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-2.5-pro-preview)", defaultValue = "gemini-2.5-pro-preview")
+    private String supervisorModel = "gemini-2.5-pro-preview";
+
+    @CommandLine.Option(names = {
+            "--router-model" }, description = "Model for Router agent (default: gemini-2.5-pro-preview)", defaultValue = "gemini-2.5-pro-preview")
+    private String routerModel = "gemini-2.5-pro-preview";
+
+    @CommandLine.Option(names = {
+            "--coder-model" }, description = "Model for Coder agent (default: gemini-2.5-pro-preview)", defaultValue = "gemini-2.5-pro-preview")
+    private String coderModel = "gemini-2.5-pro-preview";
+
+    @CommandLine.Option(names = {
+            "--assistant-model" }, description = "Model for Assistant agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
+    private String assistantModel = "gemini-2.0-flash";
+
+    @CommandLine.Option(names = {
+            "--searcher-model" }, description = "Model for Searcher agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
+    private String searcherModel = "gemini-2.0-flash";
+
+    @CommandLine.Option(names = {
+            "--tester-model" }, description = "Model for Tester agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
+    private String testerModel = "gemini-2.0-flash";
 
     @CommandLine.Option(names = {
             "--max-tools" }, description = "Maximum number of cached tools before GC eviction (default: 10)", defaultValue = "10")
@@ -196,15 +220,25 @@ public class JForgeAgent implements Callable<Integer> {
         initLogging();
         loadMemory();
 
-        supervisor = new Agent("supervisor", defaultModel, SUPERVISOR_INSTRUCTION);
-        router = new Agent("router", defaultModel, ROUTER_INSTRUCTION);
-        coder = new Agent("coder", defaultModel, CODER_INSTRUCTION);
-        assistant = new Agent("assistant", defaultModel, ASSISTANT_INSTRUCTION);
-        searcher = new Agent("searcher", defaultModel, SEARCHER_INSTRUCTION, new GoogleSearchTool());
-        tester = new Agent("tester", defaultModel, TESTER_INSTRUCTION);
+        // --model overrides all individual per-agent model options
+        if (defaultModel != null && !defaultModel.isBlank()) {
+            supervisorModel = defaultModel;
+            routerModel     = defaultModel;
+            coderModel      = defaultModel;
+            assistantModel  = defaultModel;
+            searcherModel   = defaultModel;
+            testerModel     = defaultModel;
+        }
 
-        status("@|faint [LLM] Model: " + defaultModel
-                + " | Agents: supervisor, router, coder, assistant, searcher, tester|@");
+        supervisor = new Agent("supervisor", supervisorModel, SUPERVISOR_INSTRUCTION);
+        router     = new Agent("router",     routerModel,     ROUTER_INSTRUCTION);
+        coder      = new Agent("coder",      coderModel,      CODER_INSTRUCTION);
+        assistant  = new Agent("assistant",  assistantModel,  ASSISTANT_INSTRUCTION);
+        searcher   = new Agent("searcher",   searcherModel,   SEARCHER_INSTRUCTION, new GoogleSearchTool());
+        tester     = new Agent("tester",     testerModel,     TESTER_INSTRUCTION);
+
+        status("@|faint [LLM] PRO  → supervisor, router, coder   [" + supervisorModel + "]|@");
+        status("@|faint [LLM] FAST → assistant, searcher, tester [" + assistantModel  + "]|@");
         if (promptFlag != null && !promptFlag.isBlank()) {
             if (!silent)
                 printWelcome();
