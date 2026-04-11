@@ -56,6 +56,7 @@ public class JForgeAgent implements Callable<Integer> {
 
     private static final Path TOOLS_DIR = Path.of("tools");
     private static final Path LOGS_DIR = Path.of("logs");
+    private static final Path WORKFLOWS_DIR = Path.of("workflows");
     private static final Path ARTIFACTS_DIR = Path.of("artifacts");
     private static final Path PRODUCTS_DIR = Path.of("products");
     private static final Path MEMORY_DIR = Path.of("memory");
@@ -210,6 +211,7 @@ public class JForgeAgent implements Callable<Integer> {
 
         Files.createDirectories(TOOLS_DIR);
         Files.createDirectories(LOGS_DIR);
+        Files.createDirectories(WORKFLOWS_DIR);
         Files.createDirectories(ARTIFACTS_DIR);
         Files.createDirectories(PRODUCTS_DIR);
         Files.createDirectories(MEMORY_DIR);
@@ -244,6 +246,7 @@ public class JForgeAgent implements Callable<Integer> {
         status("@|bold,cyan Welcome to JForge V1.0 - Tool Orchestrator.|@");
         status("Available tools are cached in: @|yellow " + TOOLS_DIR.toAbsolutePath() + "|@");
         status("Logs are recorded in:          @|yellow " + LOGS_DIR.toAbsolutePath() + "|@");
+        status("Workflow patterns stored in:   @|yellow " + WORKFLOWS_DIR.toAbsolutePath() + "|@");
         status("Workspace [Products]:          @|yellow " + PRODUCTS_DIR.toAbsolutePath() + "|@");
         status("Workspace [Artifacts]:         @|yellow " + ARTIFACTS_DIR.toAbsolutePath() + "|@\n");
     }
@@ -385,21 +388,55 @@ public class JForgeAgent implements Callable<Integer> {
     }
 
     /**
-     * Persists the raw WorkflowPlan JSON to logs/workflow_<timestamp><suffix>.json
+     * Persists a successful WorkflowPlan JSON to workflows/workflow_<timestamp>.json.
+     * Replans are saved to logs/ only (debugging), not to workflows/ (not reusable patterns).
      */
     private void saveWorkflowPlan(String rawJson, String timestamp, String suffix) {
         if (rawJson == null || rawJson.isBlank())
             return;
-        // Extract only the JSON block (strip any prose the LLM may have added)
         int start = rawJson.indexOf('{');
         int end = rawJson.lastIndexOf('}');
         String json = (start != -1 && end > start) ? rawJson.substring(start, end + 1) : rawJson;
-        Path file = LOGS_DIR.resolve("workflow_" + timestamp + suffix + ".json");
+        // Successful plans go to workflows/ for Supervisor reuse; replans go to logs/ for debugging
+        Path dir = suffix.isEmpty() ? WORKFLOWS_DIR : LOGS_DIR;
+        Path file = dir.resolve("workflow_" + timestamp + suffix + ".json");
         try {
             Files.writeString(file, json);
-            logToFile("[SUPERVISOR] Workflow plan saved: " + file.getFileName());
+            logToFile("[SUPERVISOR] Workflow plan saved: " + file);
         } catch (IOException e) {
             logToFile("[WARN] Could not save workflow plan: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Reads the last 3 successful workflow plans from workflows/ and returns a
+     * compact summary for the Supervisor context — goal + step sequence only.
+     */
+    private String loadRecentWorkflows() {
+        try {
+            if (!Files.exists(WORKFLOWS_DIR)) return "";
+            List<Path> files;
+            try (Stream<Path> s = Files.list(WORKFLOWS_DIR)) {
+                files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                         .sorted(BY_MTIME_DESC)
+                         .limit(3)
+                         .toList();
+            }
+            if (files.isEmpty()) return "";
+            var sb = new StringBuilder();
+            for (Path f : files) {
+                WorkflowPlan plan = parseWorkflowPlan(Files.readString(f));
+                if (plan == null || plan.steps().isEmpty()) continue;
+                sb.append("Goal: ").append(plan.goal()).append("\n");
+                sb.append("Steps: ").append(plan.steps().stream()
+                        .map(step -> truncate(step.goal(), 60))
+                        .collect(Collectors.joining(" → ")));
+                sb.append("\n\n");
+            }
+            return sb.toString().strip();
+        } catch (IOException e) {
+            logToFile("[WARN] loadRecentWorkflows: " + e.getMessage());
+            return "";
         }
     }
 
@@ -407,6 +444,7 @@ public class JForgeAgent implements Callable<Integer> {
         if (state.cacheList == null)
             state.cacheList = listCachedTools().stream()
                     .reduce((a, b) -> a + ",\n" + b).orElse("Empty");
+        String recentWorkflows = loadRecentWorkflows();
         return String.format("""
                 [Workspace Topology]
                 %s
@@ -417,6 +455,9 @@ public class JForgeAgent implements Callable<Integer> {
                 [Cached Tools]
                 [%s]
 
+                [Recent Successful Workflows]
+                %s
+
                 [Recent Chat History]
                 %s
 
@@ -424,7 +465,9 @@ public class JForgeAgent implements Callable<Integer> {
 
                 Generate a WorkflowPlan JSON.
                 """,
-                WORKSPACE_TOPOLOGY, buildClock(), state.cacheList, buildHistory(), userGoal);
+                WORKSPACE_TOPOLOGY, buildClock(), state.cacheList,
+                recentWorkflows.isEmpty() ? "None" : recentWorkflows,
+                buildHistory(), userGoal);
     }
 
     private String buildSupervisorReplanPrompt(String userGoal, WorkflowPlan failedPlan,

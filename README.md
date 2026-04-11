@@ -378,13 +378,14 @@ JForge creates and manages five directories relative to where you run it:
 ```
 ./
 ├── tools/          ← Generated .java scripts + .meta.json schemas
-│   ├── WeatherTool.java
-│   ├── WeatherTool.meta.json
+│   ├── WeatherFetcher.java
+│   ├── WeatherFetcher.meta.json
 │   └── ...
-├── logs/           ← Session logs (last 3 retained) + workflow plans
-│   ├── session_20260410_143022.log
-│   ├── workflow_20260410_143022.json          ← WorkflowPlan (initial)
-│   └── workflow_20260410_143022_replan1.json  ← WorkflowPlan after replan
+├── workflows/      ← Successful WorkflowPlan JSONs (read by Supervisor for pattern reuse)
+│   └── workflow_20260411_164500.json
+├── logs/           ← Session logs + failed replan JSONs (audit only)
+│   ├── session_20260411_164500.log
+│   └── workflow_20260411_164500_replan1.json
 ├── memory/         ← Persistent conversation memory (one entry per line)
 │   └── context.json
 ├── artifacts/      ← Temporary data written by tools (extractions, raw downloads)
