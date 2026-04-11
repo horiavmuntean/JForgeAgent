@@ -3,6 +3,7 @@
 //DEPS com.google.adk:google-adk:1.0.0-rc.1
 //DEPS org.slf4j:slf4j-simple:2.0.12
 //DEPS info.picocli:picocli:4.7.5
+//DEPS com.google.code.gson:gson:2.10.1
 
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.runner.InMemoryRunner;
@@ -35,6 +36,18 @@ import java.util.stream.Stream;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import static picocli.CommandLine.Help.Ansi.AUTO;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @Command(name = "jforge", mixinStandardHelpOptions = true, version = "JForge V1.0", description = "MCP Metadata Tool Orchestrator - Autonomous Java Agent", headerHeading = "@|bold,underline Usage|@:%n%n", descriptionHeading = "%n@|bold,underline Description|@:%n%n", optionListHeading = "%n@|bold,underline Options|@:%n")
 public class JForgeAgent implements Callable<Integer> {
@@ -99,6 +112,13 @@ public class JForgeAgent implements Callable<Integer> {
     };
 
     /**
+     * OS-specific system/hidden files that the guardrail must never move to products/.
+     * Covers Windows (Thumbs.db, desktop.ini) and any future platform artefacts.
+     */
+    private static final Set<String> GUARDRAIL_IGNORED_FILES = Set.of(
+            "thumbs.db", "desktop.ini", "ehthumbs.db", "ehthumbs_vista.db");
+
+    /**
      * JVM/jbang flag prefixes that the LLM must not inject into script arguments.
      */
     private static final List<String> BLOCKED_ARG_PREFIXES = List.of("-D", "-X", "--classpath", "--deps",
@@ -140,6 +160,7 @@ public class JForgeAgent implements Callable<Integer> {
     /** Captures the last result text when running in --silent / machine mode. */
     private final StringBuilder resultBuffer = new StringBuilder();
 
+    private Agent supervisor;
     private Agent router;
     private Agent coder;
     private Agent assistant;
@@ -175,6 +196,7 @@ public class JForgeAgent implements Callable<Integer> {
         initLogging();
         loadMemory();
 
+        supervisor = new Agent("supervisor", defaultModel, SUPERVISOR_INSTRUCTION);
         router = new Agent("router", defaultModel, ROUTER_INSTRUCTION);
         coder = new Agent("coder", defaultModel, CODER_INSTRUCTION);
         assistant = new Agent("assistant", defaultModel, ASSISTANT_INSTRUCTION);
@@ -182,7 +204,7 @@ public class JForgeAgent implements Callable<Integer> {
         tester = new Agent("tester", defaultModel, TESTER_INSTRUCTION);
 
         status("@|faint [LLM] Model: " + defaultModel
-                + " | Agents: router, coder, assistant, searcher, tester|@");
+                + " | Agents: supervisor, router, coder, assistant, searcher, tester|@");
         if (promptFlag != null && !promptFlag.isBlank()) {
             if (!silent)
                 printWelcome();
@@ -270,6 +292,172 @@ public class JForgeAgent implements Callable<Integer> {
         }
     }
 
+    // ==================== SUPERVISOR WORKFLOW ====================
+
+    /**
+     * Main orchestration path: the Supervisor decomposes the user goal into a
+     * WorkflowPlan and the WorkflowExecutor runs it. On failure the Supervisor
+     * is asked to replan (max {@code MAX_REPLANS} times). If the plan cannot be
+     * parsed at all, falls back to the legacy Router loop.
+     */
+    private void supervisorWorkflow(String userPrompt) throws Exception {
+        final int MAX_REPLANS = 2;
+        status("@|bold,cyan [SUPERVISOR] Decomposing goal into workflow...|@");
+
+        LoopState state = new LoopState();
+        String timestamp = LocalDateTime.now().format(FMT_LOG_TS);
+
+        String rawJson = supervisor.invoke(buildSupervisorPrompt(userPrompt, state));
+        WorkflowPlan plan = parseWorkflowPlan(rawJson);
+        saveWorkflowPlan(rawJson, timestamp, "");
+
+        if (plan == null || plan.steps().isEmpty()) {
+            status("@|bold,yellow [SUPERVISOR] No valid plan produced — falling back to Router mode.|@");
+            logToFile("[SUPERVISOR] Plan parse failed — delegating to processDemandRouter.");
+            processDemandRouter(userPrompt);
+            return;
+        }
+
+        logToFile("[SUPERVISOR] Plan '" + plan.goal() + "' | " + plan.steps().size() + " steps");
+        status("@|bold,cyan [SUPERVISOR] " + plan.steps().size() + " steps planned for: "
+                + truncate(plan.goal(), 80) + "|@");
+
+        for (int replan = 0; replan <= MAX_REPLANS; replan++) {
+            boolean ok = new WorkflowExecutor().execute(plan, state);
+            if (ok) {
+                addToMemory("USER: " + userPrompt);
+                addToMemory("SYSTEM (WORKFLOW): " + plan.goal()
+                        + " | steps=" + plan.steps().size());
+                break;
+            }
+
+            if (replan == MAX_REPLANS) {
+                status("@|bold,red [SUPERVISOR] Max replans (" + MAX_REPLANS
+                        + ") reached. Aborting.|@");
+                logToFile("[SUPERVISOR] Max replans exceeded. Last error: "
+                        + truncate(state.lastError, 300));
+                break;
+            }
+
+            status("@|bold,yellow [SUPERVISOR] Replanning (" + (replan + 1) + "/" + MAX_REPLANS
+                    + ") due to: " + truncate(state.lastError, 80) + "|@");
+            logToFile("[SUPERVISOR] Replan " + (replan + 1) + ". Error: "
+                    + truncate(state.lastError, 200));
+
+            String prevError = state.lastError;
+            state.lastError = null;
+
+            rawJson = supervisor.invoke(buildSupervisorReplanPrompt(userPrompt, plan, prevError, state));
+            plan = parseWorkflowPlan(rawJson);
+            saveWorkflowPlan(rawJson, timestamp, "_replan" + (replan + 1));
+
+            if (plan == null || plan.steps().isEmpty()) {
+                status("@|bold,red [SUPERVISOR] Replan produced no valid plan. Aborting.|@");
+                break;
+            }
+
+            logToFile("[SUPERVISOR] New plan after replan " + (replan + 1)
+                    + ": " + plan.goal() + " | " + plan.steps().size() + " steps");
+        }
+    }
+
+    /** Persists the raw WorkflowPlan JSON to logs/workflow_<timestamp><suffix>.json */
+    private void saveWorkflowPlan(String rawJson, String timestamp, String suffix) {
+        if (rawJson == null || rawJson.isBlank()) return;
+        // Extract only the JSON block (strip any prose the LLM may have added)
+        int start = rawJson.indexOf('{');
+        int end   = rawJson.lastIndexOf('}');
+        String json = (start != -1 && end > start) ? rawJson.substring(start, end + 1) : rawJson;
+        Path file = LOGS_DIR.resolve("workflow_" + timestamp + suffix + ".json");
+        try {
+            Files.writeString(file, json);
+            logToFile("[SUPERVISOR] Workflow plan saved: " + file.getFileName());
+        } catch (IOException e) {
+            logToFile("[WARN] Could not save workflow plan: " + e.getMessage());
+        }
+    }
+
+    private String buildSupervisorPrompt(String userGoal, LoopState state) {
+        if (state.cacheList == null)
+            state.cacheList = listCachedTools().stream()
+                    .reduce((a, b) -> a + ",\n" + b).orElse("Empty");
+        return String.format("""
+                [Workspace Topology]
+                %s
+
+                [System Clock]
+                %s
+
+                [Cached Tools]
+                [%s]
+
+                [Recent Chat History]
+                %s
+
+                User Goal: %s
+
+                Generate a WorkflowPlan JSON.
+                """,
+                WORKSPACE_TOPOLOGY, buildClock(), state.cacheList, buildHistory(), userGoal);
+    }
+
+    private String buildSupervisorReplanPrompt(String userGoal, WorkflowPlan failedPlan,
+            String error, LoopState state) {
+        String prevSteps = failedPlan.steps().stream()
+                .map(s -> "  " + s.id() + ": " + truncate(s.goal(), 80))
+                .collect(Collectors.joining("\n"));
+        return buildSupervisorPrompt(userGoal, state)
+                + "\n\nPREVIOUS PLAN FAILED:\n" + prevSteps
+                + "\n\nERROR:\n" + error
+                + "\n\nGenerate a corrected WorkflowPlan JSON.";
+    }
+
+    /**
+     * Extracts and parses the JSON WorkflowPlan from a (possibly decorated) LLM response.
+     * Returns null on any parse failure — callers must handle gracefully.
+     */
+    private WorkflowPlan parseWorkflowPlan(String json) {
+        if (json == null || json.isBlank()) return null;
+
+        // Extract the outermost {...} block (LLM may wrap JSON in prose)
+        int start = json.indexOf('{');
+        int end = json.lastIndexOf('}');
+        if (start == -1 || end == -1 || end <= start) return null;
+        String trimmed = json.substring(start, end + 1);
+
+        try {
+            Gson gson = new Gson();
+            JsonObject root = gson.fromJson(trimmed, JsonObject.class);
+            String goal = jsonStr(root, "goal", "");
+
+            List<WorkflowStep> steps = new ArrayList<>();
+            if (root.has("steps")) {
+                JsonArray arr = root.getAsJsonArray("steps");
+                for (var el : arr) {
+                    JsonObject s = el.getAsJsonObject();
+                    String id = jsonStr(s, "id", "s" + steps.size());
+                    String stepGoal = jsonStr(s, "goal", "");
+
+                    List<String> dependsOn = new ArrayList<>();
+                    if (s.has("dependsOn"))
+                        for (var d : s.getAsJsonArray("dependsOn")) dependsOn.add(d.getAsString());
+
+                    steps.add(new WorkflowStep(id, stepGoal, dependsOn));
+                }
+            }
+            return new WorkflowPlan(goal, steps);
+        } catch (Exception e) {
+            logToFile("[SUPERVISOR] WorkflowPlan parse failed: " + e.getMessage()
+                    + " | JSON: " + truncate(trimmed, 400));
+            return null;
+        }
+    }
+
+    /** Null-safe string getter for a JsonObject field with a default value. */
+    private static String jsonStr(JsonObject obj, String key, String def) {
+        return (obj.has(key) && !obj.get(key).isJsonNull()) ? obj.get(key).getAsString() : def;
+    }
+
     // ==================== CHAT MENU ====================
 
     private void startChatMenu() throws Exception {
@@ -304,7 +492,13 @@ public class JForgeAgent implements Callable<Integer> {
 
     // ==================== ORCHESTRATION ====================
 
+    /** Entry point for every user request — delegates to the Supervisor+WorkflowExecutor pipeline. */
     private void processDemand(String userPrompt) throws Exception {
+        supervisorWorkflow(userPrompt);
+    }
+
+    /** Legacy Router loop — used as fallback when the Supervisor fails to produce a valid plan. */
+    private void processDemandRouter(String userPrompt) throws Exception {
         LoopState state = new LoopState();
 
         while (!state.taskResolved) {
@@ -700,6 +894,45 @@ public class JForgeAgent implements Callable<Integer> {
         return prompt;
     }
 
+    // ==================== GUARDRAILS ====================
+
+    /**
+     * Guardrail: after every tool execution, scans tools/ and moves any non-tool
+     * files (PDFs, CSVs, images, etc.) to products/. Also removes stray
+     * subdirectories created by tools that used malformed paths (e.g. paths with
+     * literal quote characters from broken argument passing).
+     */
+    private void guardrailMoveOutputFiles() {
+        try (Stream<Path> stream = Files.walk(TOOLS_DIR)) {
+            stream
+                    .filter(p -> !p.equals(TOOLS_DIR))
+                    .sorted(Comparator.reverseOrder()) // depth-first: process files before their parent dirs
+                    .forEach(p -> {
+                        try {
+                            if (Files.isRegularFile(p)) {
+                                String name = p.getFileName().toString();
+                                if (name.startsWith(".")) return;                    // macOS/Linux hidden files (.DS_Store etc.)
+                                if (GUARDRAIL_IGNORED_FILES.contains(name.toLowerCase())) return; // Windows system files
+                                if (name.endsWith(".java") || name.endsWith(".meta.json")) return;
+                                // Output file found inside tools/ — relocate to products/
+                                Path dest = PRODUCTS_DIR.resolve(p.getFileName());
+                                Files.move(p, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                                status("@|bold,yellow [GUARDRAIL] Output file moved to products/: |@" + name);
+                                logToFile("[GUARDRAIL] Moved " + p + " → " + dest);
+                            } else if (Files.isDirectory(p)) {
+                                // Stray subdirectory (artefact of a path with literal quotes or extra slashes)
+                                Files.deleteIfExists(p);
+                                logToFile("[GUARDRAIL] Removed stray directory in tools/: " + p.getFileName());
+                            }
+                        } catch (IOException e) {
+                            logToFile("[WARN] guardrailMoveOutputFiles: " + e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            logToFile("[WARN] guardrailMoveOutputFiles scan failed: " + e.getMessage());
+        }
+    }
+
     // ==================== UTILITIES ====================
 
     /**
@@ -847,6 +1080,7 @@ public class JForgeAgent implements Callable<Integer> {
             success = false;
         }
 
+        guardrailMoveOutputFiles();
         return new ProcessResult(success, executionOutput);
     }
 
@@ -1072,6 +1306,59 @@ public class JForgeAgent implements Callable<Integer> {
             - Output nothing else. No explanation. No markdown.
             """;
 
+    private static final String SUPERVISOR_INSTRUCTION = """
+            You are a Workflow Supervisor for a Java tool orchestrator.
+            Your ONLY job: decide whether the user's request needs a single step or a multi-step workflow,
+            and produce a WorkflowPlan JSON.
+
+            You do NOT decide HOW each step is implemented. A Router agent handles that automatically.
+            You only define WHAT each step should achieve and WHICH steps depend on others.
+
+            Output ONLY valid JSON. No markdown, no code fences, no explanation.
+
+            Schema:
+            {
+              "goal": "<one-line summary>",
+              "steps": [
+                {
+                  "id": "s1",
+                  "goal": "<sub-goal for this step — use <<sN>> to inject the output of step sN>",
+                  "dependsOn": []
+                }
+              ]
+            }
+
+            Rules:
+            - id must be unique: s1, s2, s3, ...
+            - dependsOn: IDs of steps that must finish before this one starts
+            - Steps with no mutual dependency run in parallel — use this for independent sub-tasks
+            - Use <<stepId>> in a goal to chain the output of a previous step
+            - For simple questions or single-tool requests, produce exactly ONE step
+            - For complex workflows, decompose into the minimum number of steps needed
+
+            EXAMPLE 1 — Simple question (single step, Router uses the Assistant):
+            Goal: "Who is the current president of the USA?"
+            {"goal":"Answer question about US president","steps":[
+              {"id":"s1","goal":"Who is the current president of the USA?","dependsOn":[]}
+            ]}
+
+            EXAMPLE 2 — Single tool request (single step, Router handles search/create/execute):
+            Goal: "Show the current Bitcoin price"
+            {"goal":"Fetch current Bitcoin price","steps":[
+              {"id":"s1","goal":"Fetch and display the current Bitcoin price in USD","dependsOn":[]}
+            ]}
+
+            EXAMPLE 3 — Complex workflow: create once, run in parallel, summarize:
+            Goal: "Get current weather for London, Tokyo and New York and summarize"
+            {"goal":"Multi-city weather summary","steps":[
+              {"id":"s1","goal":"Create or use a weather tool that accepts a city name and shows temperature and conditions","dependsOn":[]},
+              {"id":"s2","goal":"Show weather for London","dependsOn":["s1"]},
+              {"id":"s3","goal":"Show weather for Tokyo","dependsOn":["s1"]},
+              {"id":"s4","goal":"Show weather for New York","dependsOn":["s1"]},
+              {"id":"s5","goal":"Summarize these weather results in a clear comparison table: <<s2>> | <<s3>> | <<s4>>","dependsOn":["s2","s3","s4"]}
+            ]}
+            """;
+
     // ==================== AGENTE ====================
 
     private class Agent {
@@ -1135,9 +1422,160 @@ public class JForgeAgent implements Callable<Integer> {
         int loopIterations = 0;
         int searchCount = 0;
         String ragContext = "";
-        String cacheList = null; // null = stale, recarrega sob demanda
+        String cacheList = null; // null = stale, reloads on demand
+        /** Accumulated step outputs keyed by step id — used for ${stepId} chaining. */
+        final Map<String, String> stepResults = new HashMap<>();
     }
 
-    private record ProcessResult(boolean success, String output) {
+    private record ProcessResult(boolean success, String output) {}
+
+    // ==================== WORKFLOW EXECUTOR ====================
+
+    /**
+     * Executes a WorkflowPlan by delegating each step to the Router loop.
+     *
+     * Architecture:
+     *   Supervisor  →  decides WHAT to do and in what order (sub-goals + dependencies)
+     *   Router      →  decides HOW to achieve each sub-goal (SEARCH/CREATE/EXECUTE/CHAT)
+     *
+     * Execution model:
+     *   - Steps are grouped into topological layers via dependency analysis.
+     *   - Steps in the same layer (no mutual dependency) run in parallel via VirtualThreads.
+     *   - Each step gets its own Router loop (processDemandRouter) with isolated LoopState.
+     *   - ${stepId} placeholders in a step's goal are replaced with the output of that step.
+     */
+    private class WorkflowExecutor {
+
+        /** Step output keyed by step id — thread-safe for parallel layers. */
+        private final Map<String, String> stepResults = new ConcurrentHashMap<>();
+
+        /**
+         * @return true if all steps completed; false if a step failed and replan is needed.
+         */
+        boolean execute(WorkflowPlan plan, LoopState workflowState) throws Exception {
+            List<List<WorkflowStep>> layers = buildExecutionLayers(plan.steps());
+            logToFile("[EXECUTOR] Plan: '" + plan.goal()
+                    + "' | " + plan.steps().size() + " steps | " + layers.size() + " layers");
+
+            for (int i = 0; i < layers.size(); i++) {
+                List<WorkflowStep> layer = layers.get(i);
+                status("@|bold,blue [EXECUTOR] Layer " + (i + 1) + "/" + layers.size() + ": ["
+                        + layer.stream().map(WorkflowStep::id).collect(Collectors.joining(", ")) + "]|@");
+
+                boolean layerOk = executeLayer(layer, workflowState);
+                if (!layerOk) {
+                    logToFile("[EXECUTOR] Layer " + (i + 1) + " failed.");
+                    return false;
+                }
+            }
+
+            workflowState.stepResults.putAll(stepResults);
+            return true;
+        }
+
+        /**
+         * Runs all steps in a layer.
+         * Steps run in parallel via VirtualThreads; each gets its own Router LoopState.
+         */
+        private boolean executeLayer(List<WorkflowStep> layer, LoopState workflowState) throws Exception {
+            if (layer.size() == 1) {
+                return executeSingleStep(layer.get(0), workflowState);
+            }
+
+            // Parallel execution: one VirtualThread per step, each with an isolated Router loop
+            try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+                var futures = layer.stream()
+                        .map(step -> pool.submit(() -> executeSingleStep(step, workflowState)))
+                        .toList();
+
+                boolean allOk = true;
+                for (var f : futures) {
+                    if (!f.get()) allOk = false;
+                }
+                return allOk;
+            }
+        }
+
+        /**
+         * Resolves <<stepId>> in the step's goal, then delegates to the Router loop.
+         * Captures the final output from resultBuffer for downstream chaining.
+         *
+         * Thread safety: resultBuffer and Agent sessions are shared instance state.
+         * synchronized(JForgeAgent.this) serializes LLM calls and buffer access so
+         * parallel VirtualThreads don't clobber each other's results.
+         */
+        private boolean executeSingleStep(WorkflowStep step, LoopState workflowState) throws Exception {
+            String goal = resolveChaining(step.goal(), stepResults);
+
+            status("@|faint [STEP " + step.id() + "] → |@" + truncate(goal, 80));
+            logToFile("[STEP " + step.id() + "] goal: " + goal);
+
+            String output;
+            synchronized (JForgeAgent.this) {
+                resultBuffer.setLength(0);
+                // Delegate entirely to the Router — it decides SEARCH/CREATE/EXECUTE/CHAT
+                processDemandRouter(goal);
+                output = resultBuffer.toString().strip();
+            }
+
+            stepResults.put(step.id(), output);
+            logToFile("[STEP " + step.id() + "] result: " + truncate(output, 200));
+
+            boolean ok = !output.isBlank();
+            if (!ok) workflowState.lastError = "[STEP " + step.id() + "] produced no output — possible LLM failure.";
+            return ok;
+        }
+
+        /**
+         * Topological sort: assigns each step a "level" = max(dependsOn levels) + 1.
+         * Steps sharing the same level have no mutual dependency and form a parallel layer.
+         */
+        private List<List<WorkflowStep>> buildExecutionLayers(List<WorkflowStep> steps) {
+            Map<String, WorkflowStep> byId = steps.stream()
+                    .collect(Collectors.toMap(WorkflowStep::id, s -> s));
+            Map<String, Integer> levels = new HashMap<>();
+            for (WorkflowStep s : steps) computeLevel(s, byId, levels);
+
+            Map<Integer, List<WorkflowStep>> layerMap = new LinkedHashMap<>();
+            for (WorkflowStep s : steps)
+                layerMap.computeIfAbsent(levels.get(s.id()), k -> new ArrayList<>()).add(s);
+
+            return new ArrayList<>(layerMap.values());
+        }
+
+        private int computeLevel(WorkflowStep step, Map<String, WorkflowStep> byId,
+                Map<String, Integer> levels) {
+            if (levels.containsKey(step.id())) return levels.get(step.id());
+            int level = step.dependsOn().stream()
+                    .filter(byId::containsKey)
+                    .mapToInt(depId -> computeLevel(byId.get(depId), byId, levels) + 1)
+                    .max().orElse(0);
+            levels.put(step.id(), level);
+            return level;
+        }
+
+        /** Replaces <<stepId>> placeholders with the captured output of that step. */
+        private String resolveChaining(String text, Map<String, String> results) {
+            if (text == null) return "";
+            for (var e : results.entrySet())
+                text = text.replace("<<" + e.getKey() + ">>", e.getValue());
+            return text;
+        }
     }
+
+    // ==================== AUXILIARY CLASSES ====================
+
+    /**
+     * One task inside a WorkflowPlan.
+     * The Router decides HOW to achieve the goal (SEARCH / CREATE / EXECUTE / CHAT).
+     * The Supervisor only decides WHAT to achieve and in what order.
+     */
+    private record WorkflowStep(
+            String id,           // unique identifier: s1, s2, ...
+            String goal,         // sub-goal delegated to the Router (may contain ${stepId} placeholders)
+            List<String> dependsOn  // step IDs that must complete before this one
+    ) {}
+
+    /** The full plan returned by the Supervisor. */
+    private record WorkflowPlan(String goal, List<WorkflowStep> steps) {}
 }

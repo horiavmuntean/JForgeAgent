@@ -7,12 +7,12 @@
 </p>
 
 <p align="center">
-  <strong>The self-evolving agent that builds its own toolbox on the fly.</strong>
+  <strong>The self-evolving agent that builds its own toolbox — and orchestrates it as a workflow.</strong>
 </p>
 
 ---
 
-JForge is an **orchestration engine**: you describe what you want in plain English, and JForge decides whether to forge a new Java tool from scratch, reuse a cached one, search the web for live data, or simply answer you conversationally.
+JForge is a **two-layer orchestration engine**: a **Supervisor** decomposes your goal into a structured workflow plan, and a **Router** decides how to execute each step — forging new Java tools, reusing cached ones, searching the web, or answering conversationally. Complex multi-step tasks run automatically, with parallel execution and result chaining between steps.
 
 ---
 
@@ -25,9 +25,12 @@ JForge is an **orchestration engine**: you describe what you want in plain Engli
    - [3. Get a Gemini API Key](#3-get-a-gemini-api-key)
    - [4. Clone & Run](#4-clone--run)
 3. [Architecture](#-architecture)
-   - [The Orchestration Loop](#the-orchestration-loop)
-   - [The Five Agents](#the-five-agents)
+   - [Two-Layer Orchestration](#two-layer-orchestration)
+   - [Supervisor Agent](#supervisor-agent)
+   - [Workflow Executor](#workflow-executor)
+   - [The Six Agents](#the-six-agents)
    - [Workspace Layout](#workspace-layout)
+   - [Guardrails](#guardrails)
    - [Safety & Security Layers](#safety--security-layers)
    - [Cognitive Garbage Collector](#cognitive-garbage-collector)
 4. [CLI Options](#-cli-options)
@@ -40,8 +43,15 @@ JForge is an **orchestration engine**: you describe what you want in plain Engli
 
 ```mermaid
 graph TD
-    User([User Prompt]) --> Router{Router Agent}
-    Router -- SEARCH --> Searcher[Searcher Agent]
+    User([User Prompt]) --> Supervisor{Supervisor Agent}
+
+    Supervisor -- "WorkflowPlan\n(1 step)" --> Exec1[WorkflowExecutor\nSingle Step]
+    Supervisor -- "WorkflowPlan\n(multi-step)" --> ExecN[WorkflowExecutor\nParallel Layers]
+
+    Exec1 --> Router
+    ExecN --> Router
+
+    Router{Router Agent} -- SEARCH --> Searcher[Searcher Agent]
     Searcher -- Grounding Data --> Router
     Router -- CREATE --> Coder[Coder Agent]
     Router -- EDIT --> Coder
@@ -56,8 +66,13 @@ graph TD
     Tester -- TEST FAILED\nauto-heal --> Router
     Save -- EDIT --> JBang
 
-    JBang -- Success --> Resolved([Task Resolved])
+    JBang -- Success --> Guardrail{Output Guardrail}
+    Guardrail -- Files in tools/ --> Products[products/]
+    Guardrail -- Clean --> Resolved([Step Resolved])
     JBang -- Failure --> Router
+
+    ExecN -- All steps done --> Summary([Task Resolved])
+    Supervisor -- Replan on failure --> ExecN
 ```
 
 ---
@@ -165,55 +180,124 @@ jbang JForgeAgent.java
 jbang .\JForgeAgent.java
 ```
 
-On first run, JBang will download all dependencies automatically (Google ADK, picocli, jsoup, slf4j). This takes ~30 seconds once — subsequent runs are instant.
+On first run, JBang will download all dependencies automatically (Google ADK, picocli, Gson, slf4j). This takes ~30 seconds once — subsequent runs are instant.
 
 **Expected welcome screen:**
 
 ```
+[LLM] Model: gemini-2.5-pro-preview | Agents: supervisor, router, coder, assistant, searcher, tester
 Welcome to JForge V1.0 - Tool Orchestrator.
-Available tools are cached in: C:\...\tools
-Logs are recorded in:          C:\...\logs
-Workspace [Products]:          C:\...\products
-Workspace [Artifacts]:         C:\...\artifacts
+Available tools are cached in: /path/to/JForgeAgent/tools
+Logs are recorded in:          /path/to/JForgeAgent/logs
+Workspace [Products]:          /path/to/JForgeAgent/products
+Workspace [Artifacts]:         /path/to/JForgeAgent/artifacts
 
-What would you like to achieve? (or 'exit'/'quit'):
+🤖 What would you like to achieve? (or 'exit'/'quit'):
 ```
 
 ---
 
 ## Architecture
 
-### The Orchestration Loop
+### Two-Layer Orchestration
 
-Every user prompt enters a **stateful orchestration loop** that runs up to 10 iterations before timing out. The loop carries a `LoopState` object through each iteration, tracking:
+Every user prompt passes through **two layers** before any work is done:
+
+```
+Layer 1 — SUPERVISOR:  What to do, in what order, with what dependencies?
+Layer 2 — ROUTER:      How to achieve each step? (search, create, execute, chat)
+```
+
+This separation means the Supervisor never needs to know about APIs, tools, or code — it only plans the workflow. The Router never needs to know about the big picture — it handles one sub-goal at a time with full intelligence.
+
+For simple requests (a single question or a single tool), the Supervisor generates a one-step plan and the Router handles it exactly as before. For complex tasks, the Supervisor generates a multi-step plan with dependencies and the WorkflowExecutor runs each step through the Router.
+
+---
+
+### Supervisor Agent
+
+The Supervisor receives your goal and the list of currently cached tools, then returns a **WorkflowPlan** in JSON:
+
+```json
+{
+  "goal": "Get weather for Southeast Brazilian cities and create a PDF summary",
+  "steps": [
+    { "id": "s1", "goal": "Get weather for Rio de Janeiro",    "dependsOn": [] },
+    { "id": "s2", "goal": "Get weather for São Paulo",         "dependsOn": [] },
+    { "id": "s3", "goal": "Get weather for Belo Horizonte",    "dependsOn": [] },
+    { "id": "s4", "goal": "Create a PDF summary using: <<s1>> | <<s2>> | <<s3>>",
+                  "dependsOn": ["s1", "s2", "s3"] }
+  ]
+}
+```
+
+**What the Supervisor decides:**
+- How many steps are needed (one for simple tasks, many for complex workflows)
+- Which steps depend on which others (`dependsOn`)
+- What each step should achieve (`goal`) — using `<<stepId>>` to inject the output of a previous step
+
+**What the Supervisor does NOT decide:**
+- Whether to SEARCH, CREATE, EXECUTE, or DELEGATE_CHAT — that is the Router's job
+- Which tool to use — the Router decides from the cache
+
+The plan is saved to `logs/workflow_<timestamp>.json` for auditing. If a step fails and the Supervisor is asked to replan, each revised version is saved as `logs/workflow_<timestamp>_replan1.json`, etc.
+
+**Fallback:** If the Supervisor fails to produce a valid plan (LLM error or malformed JSON), JForge falls back automatically to the direct Router loop — no interruption for the user.
+
+---
+
+### Workflow Executor
+
+The WorkflowExecutor receives the plan and runs it:
+
+1. **Topological sort** — groups steps into *layers* based on `dependsOn`. Steps with no mutual dependency share the same layer.
+2. **Layer-by-layer execution** — each layer completes before the next starts.
+3. **Parallel execution within a layer** — steps in the same layer run as VirtualThreads (Java 26), so independent tasks execute concurrently.
+4. **Result chaining** — after each step, its output is stored and substituted into any `<<stepId>>` placeholder in later steps' goals.
+5. **Replanning on failure** — if a step produces no output, the Supervisor is asked to replan (max 2 replans).
+
+**Example execution trace for the weather PDF request:**
+
+```
+[SUPERVISOR] 4 steps planned for: Get weather for Southeast Brazilian cities and create a PDF
+[EXECUTOR] Layer 1/2: [s1, s2, s3]          ← 3 steps run concurrently
+  [STEP s1] → Get weather for Rio de Janeiro → EXECUTE: CityWeather.java "Rio de Janeiro"
+  [STEP s2] → Get weather for Sao Paulo      → EXECUTE: CityWeather.java "Sao Paulo"
+  [STEP s3] → Get weather for Belo Horizonte → EXECUTE: CityWeather.java "Belo Horizonte"
+[EXECUTOR] Layer 2/2: [s4]
+  [STEP s4] → Create a PDF using: rio: +26°C | sao: +5°C | belo: +22°C
+            → EDIT: WeatherPdfGenerator.java  (Router edits with real data)
+            → EXECUTE: WeatherPdfGenerator.java
+[GUARDRAIL] Output file moved to products/: WeatherSummary.pdf
+```
+
+**LoopState fields** (per Router sub-loop, one per step):
 
 | Field | Purpose |
 |---|---|
-| `taskResolved` | Signals the loop to exit cleanly |
+| `taskResolved` | Signals the Router loop to exit cleanly |
 | `lastError` | Holds the stack trace from a failed tool execution |
 | `crashRetries` | Counts auto-heal attempts (max 2 before aborting) |
-| `searchCount` | Limits web searches per demand (max 3) |
+| `searchCount` | Limits web searches per step (max 3) |
 | `ragContext` | Accumulates web search results as live knowledge |
 | `cacheList` | Snapshot of tools on disk (lazy-loaded, invalidated after writes) |
+| `stepResults` | Accumulated outputs keyed by step id — used for `<<stepId>>` chaining |
 
-Each iteration calls the **Router Agent**, which reads the full state — including the workspace topology, system clock, cached tool metadata, RAG context, and the last error — and returns exactly one command.
+---
 
-```
-Iteration 1:  SEARCH: "openweathermap free API endpoint"
-Iteration 2:  CREATE: "Write a weather tool using the API found in RAG context"
-Iteration 3:  EXECUTE: WeatherTool.java "São Paulo"
-              → exit code 0, task resolved
-```
-
-If the tool crashes (non-zero exit or `Exception in thread` on stdout), the error trace is fed back into the loop and the Coder Agent is instructed to fix it — **without any user intervention**.
-
-### The Five Agents
+### The Six Agents
 
 Each agent is a stateless `InMemoryRunner` wrapping a `LlmAgent` backed by Google Gemini. They share no memory — context is injected as text on every call.
 
+#### Supervisor Agent — *The Planner*
+
+Receives the user goal and the cached tool list. Returns a `WorkflowPlan` JSON defining sub-goals and their dependencies. Knows when a single step suffices (simple question, single tool) and when a multi-step workflow is needed (parallel data fetching, create then run, summarize multiple results).
+
+Does **not** decide implementation details — that is the Router's domain.
+
 #### Router Agent — *The Director*
 
-The Router reads everything: your intent, the tool cache, the system clock, the RAG context, and any prior error. It returns **exactly one** of these five commands:
+The Router reads everything: the sub-goal from the Supervisor, the tool cache, the system clock, the RAG context, and any prior error. It returns **exactly one** of these five commands:
 
 | Command | Meaning |
 |---|---|
@@ -259,14 +343,7 @@ This agent ensures that the system doesn't rely on hallucinations but on real-ti
 
 #### Assistant Agent — *The Communicator*
 
-When the Router decides no code is needed, the Assistant takes over. It receives:
-
-- Your original prompt
-- The current system clock
-- The list of available cached tools
-- Any RAG context gathered by prior `SEARCH` commands
-
-It responds in clean Markdown, grounded in real data — not in stale training knowledge.
+When the Router decides no code is needed, the Assistant takes over. It receives your original prompt, the current system clock, the list of available cached tools, and any RAG context gathered by prior `SEARCH` commands. It responds in clean Markdown, grounded in real data.
 
 #### Tester Agent — *The Validator*
 
@@ -296,7 +373,7 @@ If any check fails, the file is **never written**. `state.lastError` is set with
 
 ### Workspace Layout
 
-JForge creates and manages four directories relative to where you run it:
+JForge creates and manages five directories relative to where you run it:
 
 ```
 ./
@@ -304,8 +381,10 @@ JForge creates and manages four directories relative to where you run it:
 │   ├── WeatherTool.java
 │   ├── WeatherTool.meta.json
 │   └── ...
-├── logs/           ← Session logs (last 3 sessions retained)
-│   └── session_20260408_143022.log
+├── logs/           ← Session logs (last 3 retained) + workflow plans
+│   ├── session_20260410_143022.log
+│   ├── workflow_20260410_143022.json          ← WorkflowPlan (initial)
+│   └── workflow_20260410_143022_replan1.json  ← WorkflowPlan after replan
 ├── memory/         ← Persistent conversation memory (one entry per line)
 │   └── context.json
 ├── artifacts/      ← Temporary data written by tools (extractions, raw downloads)
@@ -316,27 +395,55 @@ Tools are instructed to use the **absolute paths** of `artifacts/` and `products
 
 ---
 
+### Guardrails
+
+JForge has two active guardrails that correct common problems automatically — no user intervention required.
+
+#### Guardrail 1 — DELEGATE_CHAT Redirect
+
+If the Router mis-routes to `DELEGATE_CHAT` but the response mentions the name of a cached tool, JForge detects the mis-route and forces re-routing to `EXECUTE`:
+
+```
+[GUARDRAIL] DELEGATE_CHAT mentioned 'WeatherTool.java' — overriding to EXECUTE
+```
+
+#### Guardrail 2 — Output File Relocation
+
+Tools run with `tools/` as their working directory. If a generated tool saves an output file (PDF, CSV, image, etc.) using a relative path or a malformed absolute path, it lands inside `tools/` instead of `products/`. After every tool execution, JForge scans `tools/` and moves any stray output files to `products/` automatically:
+
+```
+[GUARDRAIL] Output file moved to products/: WeatherSummary.pdf
+```
+
+The guardrail also removes stray subdirectories left by path-construction bugs (e.g. directories whose names contain literal quote characters). It correctly ignores:
+- `.java` and `.meta.json` files (legitimate tool files)
+- Hidden files: `.DS_Store`, `.gitignore`, etc. (macOS/Linux)
+- Windows system files: `Thumbs.db`, `desktop.ini`, etc.
+
+---
+
 ### Safety & Security Layers
 
 JForge executes LLM-generated code on your machine. Several layers of defense are active:
 
 | Layer | Mechanism |
 |---|---|
-| **Name validation** | Tool names must match `[A-Za-z0-9_\-]+\.java` — no path separators, no extensions tricks |
+| **Name validation** | Tool names must match `[A-Za-z0-9_\-]+\.java` — no path separators, no extension tricks |
 | **Path containment** | Resolved tool path must remain inside `tools/` after normalization |
 | **Symlink rejection** | Symbolic links inside `tools/` are rejected at execution time |
 | **Arg sanitization** | LLM-supplied arguments are filtered against a blocklist: `-D`, `-X`, `--classpath`, `--deps`, `--jvm-options`, `--`, `-agent`, `--source` |
 | **Process timeout** | Tools are killed after 120 seconds (`MAX_TOOL_TIMEOUT_SECONDS`) |
 | **LLM timeout** | Agent API calls time out after 60 seconds via `CompletableFuture.orTimeout()` |
-| **Loop guard** | The orchestration loop aborts after 10 iterations regardless of state |
-| **Search guard** | Maximum 3 web searches per user demand |
-| **Crash limit** | Auto-heal retries are capped at 2 attempts per demand |
+| **Loop guard** | Each Router sub-loop aborts after 10 iterations regardless of state |
+| **Replan limit** | The Supervisor may replan at most 2 times per user request |
+| **Search guard** | Maximum 3 web searches per Router sub-loop |
+| **Crash limit** | Auto-heal retries are capped at 2 attempts per step |
 
 ---
 
 ### Persistent Memory
 
-JForge automatically saves conversation history to `memory/context.json` between sessions. On the next startup, the Router reads the last interactions as `[Recent Chat History]`, allowing it to:
+JForge automatically saves conversation history to `memory/context.json` between sessions. On the next startup, the Supervisor and Router read the last interactions as `[Recent Chat History]`, allowing the system to:
 
 - Recognize tools it built in a previous session without rebuilding them
 - Avoid repeating web searches already performed
@@ -367,7 +474,7 @@ jbang JForgeAgent.java [OPTIONS]
 
 | Option | Default | Description |
 |---|---|---|
-| `--model <model>` | `gemini-3-pro-preview` | Gemini model used by all three agents |
+| `--model <model>` | `gemini-2.5-pro-preview` | Gemini model used by all six agents |
 | `--max-tools <n>` | `10` | Maximum cached tools before GC count-eviction |
 | `--tool-age-days <n>` | `30` | Days of inactivity before a tool is eligible for deletion |
 | `--prompt <text>` | — | Run a single prompt non-interactively and exit (CI/CD mode) |
@@ -380,16 +487,16 @@ jbang JForgeAgent.java [OPTIONS]
 
 ```bash
 # Use a faster model and keep up to 20 tools
-jbang .\JForgeAgent.java --model gemini-2.0-flash --max-tools 20
+jbang JForgeAgent.java --model gemini-2.0-flash --max-tools 20
 
 # Aggressive GC: delete tools unused for more than 7 days, keep max 5
-jbang .\JForgeAgent.java --tool-age-days 7 --max-tools 5
-
-# Use the most capable model for complex engineering tasks
-jbang .\JForgeAgent.java --model gemini-3-pro-preview
+jbang JForgeAgent.java --tool-age-days 7 --max-tools 5
 
 # Run a single prompt without opening an interactive session
-jbang .\JForgeAgent.java --prompt "What is the current price of Bitcoin?"
+jbang JForgeAgent.java --prompt "What is the current price of Bitcoin?"
+
+# Machine-readable output for piping
+jbang JForgeAgent.java --silent --prompt "Fetch BTCUSDT price as JSON" | jq '.price'
 ```
 
 ---
@@ -402,25 +509,24 @@ JForge can run a single prompt without an interactive terminal — ideal for she
 # Ask a question non-interactively
 jbang JForgeAgent.java --prompt "What is the current price of Bitcoin?"
 
+# Multi-step workflow non-interactively
+jbang JForgeAgent.java --prompt "Get weather for London, Paris and Berlin and summarize"
+
 # Use inside a shell script
 jbang JForgeAgent.java --prompt "Fetch the ISS location and save the map to products/"
-
-# Combine with other CLI options
-jbang JForgeAgent.java --model gemini-2.0-flash --prompt "List my Downloads folder"
 ```
 
 When `--prompt` is provided, JForge:
 
-1. Initializes all agents normally
+1. Initializes all six agents normally
 2. Loads persistent memory from previous sessions
-3. Executes the prompt through the full orchestration loop (including tool creation, search, and auto-heal)
-4. Prints the result and exits with code `0`
-
-> **Note:** If `--prompt` is not set and no interactive terminal is available, JForge exits with an error as before.
+3. Runs the Supervisor to generate a WorkflowPlan
+4. Executes the plan through the WorkflowExecutor + Router loops
+5. Prints the result and exits with code `0`
 
 ### Silent Mode — machine-readable output
 
-Add `--silent` to suppress all status messages, agent names, and decorative output. Only the final result is printed to stdout — no ANSI codes, no brackets, no banners. Ideal for piping output into other tools, MCP integrations, or A2A agents:
+Add `--silent` to suppress all status messages, agent names, and decorative output. Only the final result is printed to stdout — no ANSI codes, no brackets, no banners:
 
 ```bash
 # Output only the final result — pipe-friendly
@@ -429,319 +535,199 @@ jbang JForgeAgent.java --silent --prompt "What is the current Bitcoin price?"
 # Capture the result in a shell variable
 RESULT=$(jbang JForgeAgent.java --silent --prompt "Summarize the latest Java 26 features")
 echo "$RESULT"
-
-# Combine with jq if the tool produces JSON output
-jbang JForgeAgent.java --silent --prompt "Fetch BTCUSDT price as JSON" | jq '.price'
 ```
-
-> **Tip:** `--silent` and `--prompt` are designed to work together. Interactive mode ignores `--silent` (there would be nothing left to see).
 
 ---
 
 ## Usage & Example Prompts
 
-Once running, just type your request at the prompt. The orchestrator handles everything else.
+Once running, just type your request at the prompt. The Supervisor handles planning, the Router handles execution.
 
 ---
 
-### Live Data & Factual Questions
+### Simple Questions & Live Data
 
-JForge always searches the web before answering time-sensitive questions — it never makes up current data.
+For single-step tasks, the Supervisor generates one step and the Router handles it entirely.
 
 ```
 What is the current price of Bitcoin in USD?
 ```
 
-> Router → `SEARCH: "Bitcoin price USD today"` → `DELEGATE_CHAT` with RAG context injected
+> Supervisor → 1 step → Router → `SEARCH` → `DELEGATE_CHAT` with RAG context
 
 ```
 Who won the last FIFA World Cup and what was the final score?
 ```
 
-> Router → `SEARCH: "FIFA World Cup latest winner final score"` → `DELEGATE_CHAT`
-
-```
-What are the top 3 Java frameworks trending on GitHub right now?
-```
-
-> Router → `SEARCH: "trending Java frameworks GitHub 2026"` → `DELEGATE_CHAT`
+> Supervisor → 1 step → Router → `SEARCH` → `DELEGATE_CHAT`
 
 ---
 
 ### Forging New Tools
 
-These prompts trigger `CREATE` — JForge writes a `.java` file, saves it to `tools/`, and immediately executes it.
-
-**Weather checker:**
-
 ```
 Create a tool that fetches the current weather for any city using wttr.in
 ```
 
-> Creates `WeatherTool.java` → `EXECUTE: WeatherTool.java "London"`
-
-**Currency converter:**
+> Supervisor → 1 step → Router → `CREATE: WeatherTool.java` → `EXECUTE: WeatherTool.java "London"`
 
 ```
 Build a currency converter that uses the Frankfurter API to convert amounts between any two currencies
 ```
 
-> Creates `CurrencyConverter.java` → `EXECUTE: CurrencyConverter.java 100 USD BRL`
-
-**File organizer:**
-
-```
-Write a tool that scans a directory path I provide, groups all files by extension, and prints a summary table showing how many files and total size per type
-```
-
-> Creates `FileSummarizer.java` → `EXECUTE: FileSummarizer.java "C:/Users/me/Downloads"`
-
-**GitHub PR lister:**
-
-```
-Forge a script that uses the GitHub REST API to list all open pull requests for a given repository. I'll pass the owner and repo as arguments.
-```
-
-> Creates `GitHubPRList.java` → `EXECUTE: GitHubPRList.java "octocat" "Hello-World"`
-
-**QR Code generator:**
+> Supervisor → 1 step → Router → `SEARCH` → `CREATE: CurrencyConverter.java` → `EXECUTE`
 
 ```
 Create a tool using the ZXing library that generates a QR code PNG from any text I give it and saves it to the products folder
 ```
 
-> Creates `QRCodeGen.java` → `EXECUTE: QRCodeGen.java "https://github.com/my-project"` → saves `products/qrcode.png`
+> Supervisor → 1 step → Router → `CREATE: QRCodeGen.java` → `EXECUTE` → Guardrail moves `qrcode.png` to `products/`
 
-**Math precision calculator:**
+---
+
+### Multi-Step Workflows
+
+These requests trigger the Supervisor to generate a multi-step plan.
+
+**Parallel data collection + summary:**
 
 ```
-Write a tool using the Apfloat library to calculate Pi to 1000 decimal places and save the result to a text file in products/
+Get the current weather for London, Tokyo and New York and write a comparison summary
 ```
 
-> Creates `PiCalculator.java` → `EXECUTE: PiCalculator.java 1000`
+```
+[SUPERVISOR] 4 steps planned
+[EXECUTOR] Layer 1/2: [s1, s2, s3]   ← 3 cities fetched in parallel
+  [STEP s1] → weather London   → EXECUTE: WeatherTool.java "London"
+  [STEP s2] → weather Tokyo    → EXECUTE: WeatherTool.java "Tokyo"
+  [STEP s3] → weather New York → EXECUTE: WeatherTool.java "New York"
+[EXECUTOR] Layer 2/2: [s4]
+  [STEP s4] → summarize <<s1>> | <<s2>> | <<s3>> → DELEGATE_CHAT
+```
+
+**Create once, run in parallel:**
+
+```
+Pesquise o clima de Rio de Janeiro, São Paulo e Belo Horizonte e crie um PDF com o resumo
+```
+
+```
+[SUPERVISOR] 4 steps planned
+[EXECUTOR] Layer 1/2: [s1, s2, s3]   ← all 3 fetched in parallel
+[EXECUTOR] Layer 2/2: [s4]
+  [STEP s4] → Create PDF with: rio +26°C | sao +5°C | belo +22°C
+            → EDIT: WeatherPdfGenerator.java  (updates data)
+            → EXECUTE: WeatherPdfGenerator.java
+[GUARDRAIL] Output file moved to products/: WeatherSummary.pdf ✓
+```
+
+**Search → create → run chain:**
+
+```
+Find a free DNS benchmark API and build a tool that measures latency for the top 5 public DNS servers
+```
+
+```
+[SUPERVISOR] 3 steps planned
+[EXECUTOR] Layer 1/3: [s1]  → SEARCH: free DNS benchmark / public DNS server IPs
+[EXECUTOR] Layer 2/3: [s2]  → CREATE: DnsBenchmark.java using <<s1>>
+[EXECUTOR] Layer 3/3: [s3]  → EXECUTE: DnsBenchmark.java
+```
 
 ---
 
 ### Editing Existing Tools
 
-Once a tool is cached, you can ask JForge to modify it in plain language.
-
 ```
 Update the weather tool to also show wind speed and humidity, not just temperature
 ```
 
-> Router → `EDIT: WeatherTool.java "Add wind speed and humidity to the output"`
+> Supervisor → 1 step → Router → `EDIT: WeatherTool.java "Add wind speed and humidity"`
 
 ```
 The currency converter only does one conversion. Make it accept a list of target currencies and show all at once
 ```
 
-> Router → `EDIT: CurrencyConverter.java "Accept multiple target currencies and display a table"`
-
-```
-Add error handling to the GitHub PR tool so it prints a friendly message if the repository is not found instead of crashing
-```
-
-> Router → `EDIT: GitHubPRList.java "Handle 404 responses gracefully"`
+> Supervisor → 1 step → Router → `EDIT: CurrencyConverter.java "Accept multiple target currencies"`
 
 ---
 
-### Reusing Cached Tools (Context Shortcuts)
+### Reusing Cached Tools
 
-After a tool is built, you can invoke it again with minimal typing — the Router reads the metadata cache and maps your intent.
+After a tool is built, the Supervisor sees it in the cache and generates steps that target it directly. The Router chooses `EXECUTE` without rebuilding.
 
 ```
-# After building WeatherTool.java earlier:
+# After building WeatherTool.java:
 What's the weather in Tokyo?
 ```
 
-> Router reads cache → `EXECUTE: WeatherTool.java "Tokyo"` — no rebuild needed
+> Supervisor → 1 step → Router reads cache → `EXECUTE: WeatherTool.java "Tokyo"`
 
 ```
-# After building CurrencyConverter.java:
-How much is 500 EUR in JPY?
+# Multi-city request with existing tool:
+Show me the weather for all G7 capitals
 ```
 
-> Router reads cache → `EXECUTE: CurrencyConverter.java 500 EUR JPY`
-
-```
-# After building FileSummarizer.java:
-Summarize my Documents folder
-```
-
-> Router reads cache → `EXECUTE: FileSummarizer.java "C:/Users/me/Documents"`
+> Supervisor → 7 parallel EXECUTE steps (one per capital) + 1 summary step
 
 ---
 
 ### GUI & Visualization Tools
 
-JForge can forge Swing/JavaFX applications and chart libraries — they open as native windows.
-
 ```
 Build a Swing app that shows a live analog clock with the current local time, updating every second
 ```
 
-> Creates `AnalogClock.java` → `EXECUTE: AnalogClock.java` — opens a desktop window
+> Supervisor → 1 step → Router → `CREATE: AnalogClock.java` → `EXECUTE` — opens a desktop window
 
 ```
-Create a bar chart using the XChart library that plots the monthly average temperature for São Paulo. Hardcode some example data.
+Create a bar chart using the XChart library that plots the monthly average temperature for São Paulo
 ```
 
-> Creates `TemperatureChart.java` → opens chart window
+> Supervisor → 1 step → Router → `CREATE: TemperatureChart.java` → opens chart window
 
-```
-Make a simple Swing file explorer that opens a folder picker dialog and displays the directory tree in a JTree
-```
-
-> Creates `FileExplorer.java` → opens GUI
-
----
-
-### File System & Local Automation
-
-```
-Find all .log files in C:/Projects that are older than 7 days and print their names and sizes
-```
-
-> Creates `OldLogFinder.java` → `EXECUTE: OldLogFinder.java "C:/Projects" 7`
-
-```
-Write a tool that reads a CSV file I point it at and prints the first 10 rows as a formatted table in the terminal
-```
-
-> Creates `CsvPreview.java` → `EXECUTE: CsvPreview.java "C:/data/sales.csv"`
-
-```
-Create a batch image renamer: given a folder path, rename all .jpg files to a sequential format like photo_001.jpg, photo_002.jpg, etc.
-```
-
-> Creates `ImageRenamer.java` → `EXECUTE: ImageRenamer.java "C:/Photos/vacation"`
-
----
-
-### API & Network Tools
-
-```
-Build a tool that pings a list of hostnames and reports which ones are reachable. I'll pass the hostnames as space-separated arguments.
-```
-
-> Creates `HostPinger.java` → `EXECUTE: HostPinger.java google.com github.com api.example.com`
-
-```
-Forge a script that downloads the HTML of any URL I give it and saves it as a .html file in the artifacts folder
-```
-
-> Creates `HtmlDownloader.java` → `EXECUTE: HtmlDownloader.java "https://news.ycombinator.com"`
-
-```
-Create a tool that queries the OpenMeteo free weather API (no key needed) and returns a 7-day temperature forecast for any city coordinates I provide
-```
-
-> Searches OpenMeteo docs → Creates `ForecastTool.java` → `EXECUTE: ForecastTool.java -23.5 -46.6`
+Use `--skip-test` for GUI/Swing tools since the auto-test can't validate windowed output.
 
 ---
 
 ### Auto-Heal in Action
 
-If a generated tool crashes, you'll see the orchestrator repair it automatically:
+If a generated tool crashes, the Router repairs it automatically — within the same step:
 
 ```
-Fetch the top 5 trending repositories from GitHub API without authentication
-
-[ROUTER] Analyzing Intent...
 [CODER] Developing new Tool -> GitHubTrending.java
-[Operation Successful] Script saved as: GitHubTrending.java
 [EXECUTE] EXECUTE: GitHubTrending.java
---------[ RESULT ]--------
 Exception in thread "main" java.io.IOException: Server returned HTTP response code: 403
----------------------------
 Tool Execution Failed. Returning trace to Router for analysis...
-[ROUTER] Analyzing Intent...
 [CODER] Modifying existing tool -> GitHubTrending.java
-        Fix: Add proper User-Agent header to bypass GitHub's anonymous request blocking
-[Operation Successful] Script saved as: GitHubTrending.java
+        Fix: Add proper User-Agent header to bypass GitHub anonymous request blocking
 [EXECUTE] EXECUTE: GitHubTrending.java
---------[ RESULT ]--------
-1. awesome-llm-apps 42.3k
-2. ...
----------------------------
-Demand successfully fulfilled via native JBang tool.
+1. awesome-llm-apps 42.3k ✓
 ```
-
-No user intervention. The loop caught the 403, sent the stack trace back to the Coder, and the fix was applied in the same session.
 
 ---
 
-### Code Validation & Auto-Test in Action (Features 8 & 9)
+### Workflow Audit
 
-Every new tool goes through two quality gates before reaching the user.
+Every plan generated by the Supervisor is saved in `logs/`:
 
-**Gate 1 — Structural Validation (before writing to disk):**
-
-If the LLM generates malformed code, it is rejected before touching the filesystem:
-
-```
-[CODER] Developing new Tool -> WeatherFetcher.java
-[VALIDATION] Validation failed for 'WeatherFetcher.java': missing //DEPS directive.
-[ROUTER] Analyzing Intent...
-[CODER] Modifying existing tool -> WeatherFetcher.java
-[Operation Successful] Script saved as: WeatherFetcher.java
+```bash
+cat logs/workflow_20260410_143022.json
 ```
 
-**Gate 2 — Auto-Test (right after saving):**
-
-The Tester agent generates a safe invocation and runs it immediately:
-
-```
-[CODER] Developing new Tool -> BinancePriceFetcher.java
-[Operation Successful] Script saved as: BinancePriceFetcher.java
-[TESTER] Generating test invocation for: BinancePriceFetcher.java
-----------------[ RESULT ]----------------
-Symbol: BTCUSDT
-Current Price: 71798.91000000
-------------------------------------------
-[TEST PASSED] Tool validated successfully.
-[ROUTER] Analyzing Intent...
-[EXECUTE] EXECUTE: BinancePriceFetcher.java SOL
+```json
+{
+  "goal": "Get weather for Southeast Brazilian cities and create PDF",
+  "steps": [
+    {"id":"s1","goal":"Get weather for Rio de Janeiro","dependsOn":[]},
+    {"id":"s2","goal":"Get weather for Sao Paulo","dependsOn":[]},
+    {"id":"s3","goal":"Get weather for Belo Horizonte","dependsOn":[]},
+    {"id":"s4","goal":"Create PDF summary using: <<s1>> | <<s2>> | <<s3>>","dependsOn":["s1","s2","s3"]}
+  ]
+}
 ```
 
-If the auto-test fails, the error feeds back into the loop and triggers EDIT before the tool ever reaches the user:
-
-```
-[TEST FAILED] Tool failed validation. Routing for auto-heal...
-[ROUTER] Analyzing Intent...
-[CODER] Modifying existing tool -> BinancePriceFetcher.java
-        Fix: Handle non-200 HTTP responses explicitly
-[Operation Successful] Script saved as: BinancePriceFetcher.java
-[ROUTER] Analyzing Intent...
-[EXECUTE] EXECUTE: BinancePriceFetcher.java BTC
-```
-
-Use `--skip-test` to bypass Gate 2 for GUI/Swing tools or hardware-dependent scripts.
-
----
-
-### 💬 Conversational Mode
-
-Not every request needs code. JForge recognizes when you're just talking.
-
-```
-What's the difference between virtual threads and platform threads in Java 21+?
-```
-
-> Router → `DELEGATE_CHAT` — detailed explanation with no tool created
-
-```
-List 5 best practices for designing REST APIs
-```
-
-> Router → `DELEGATE_CHAT` — formatted Markdown response
-
-```
-What tools have you built for me so far?
-```
-
-> Router → `DELEGATE_CHAT` — Assistant reads the cache list and describes each tool
+If replanning occurred, each revised plan is saved with a `_replan1`, `_replan2` suffix alongside the session log.
 
 ---
 
@@ -749,16 +735,19 @@ What tools have you built for me so far?
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| Please set the GEMINI_API_KEY environment variable | API key not set | Export `GEMINI_API_KEY` in your shell profile and restart the terminal |
-| Interactive console is not supported | Running inside an IDE terminal or piped input | Run in a real terminal (Windows Terminal, iTerm2, Bash) |
-| `[TIMEOUT] Tool exceeded 120s` | Tool has an infinite loop or blocking network call | Ask JForge to add a timeout: *"Edit the tool to add a 10-second HTTP timeout"* |
-| `[LLM ERROR] LLM API call failed` | Network issue or Gemini quota exceeded | Check your internet connection and API quota at [Google AI Studio](https://aistudio.google.com) |
+| `Please set the GEMINI_API_KEY` | API key not set | Export `GEMINI_API_KEY` in your shell profile and restart the terminal |
+| `Interactive console is not supported` | Running inside an IDE terminal or piped input | Run in a real terminal (Windows Terminal, iTerm2, Bash) |
+| `[LLM ERROR] Context variable not found` | Template variable in agent instruction | Fixed in current version — update to latest |
+| `[SUPERVISOR] No valid plan produced — falling back to Router mode` | Supervisor LLM error or malformed JSON response | Automatic fallback; if persistent, try rephrasing the prompt |
+| `[TIMEOUT] Tool exceeded 120s` | Tool has an infinite loop or blocking network call | Ask JForge: *"Edit the tool to add a 10-second HTTP timeout"* |
+| `[LLM ERROR] LLM API call failed` | Network issue or Gemini quota exceeded | Check your internet and quota at [Google AI Studio](https://aistudio.google.com) |
 | `[LOOP GUARD] Maximum iterations reached` | Router is stuck in a SEARCH/CREATE cycle | Rephrase your prompt with more specific instructions |
-| Google Search quota reached | Too many rapid searches or API limit | Wait and try again, or check your API quota at Google AI Studio |
-| Tool compiles but produces wrong output | LLM logic error in generated code | Ask: *"The result was wrong. Fix [ToolName.java] to correctly handle [case]"* |
-| `[TEST FAILED] Tool failed validation` | Newly created tool crashed during auto-test | Auto-heal activates automatically (EDIT); use `--skip-test` to disable for GUI or hardware tools |
-| `[VALIDATION] Validation failed` | LLM generated malformed code (missing `//DEPS`, leaked markdown, etc.) | JForge retries automatically; if it persists, try rephrasing the prompt |
-| `[GUARDRAIL] DELEGATE_CHAT mentioned 'X.java' — overriding to EXECUTE` | Router mis-routed to DELEGATE_CHAT when a cached tool should have been executed | Automatic — the guardrail detects the mis-route and forces re-routing to EXECUTE |
+| `[STEP sN] produced no output` | LLM timeout or loop-guard abort on a workflow step | Supervisor will automatically replan (max 2 attempts) |
+| `[GUARDRAIL] Output file moved to products/: X` | Tool saved output to `tools/` instead of `products/` | Normal — guardrail handled it; file is in `products/` |
+| `[TEST FAILED] Tool failed validation` | Newly created tool crashed during auto-test | Auto-heal activates automatically; use `--skip-test` for GUI or hardware tools |
+| `[VALIDATION] Validation failed` | LLM generated malformed code | JForge retries automatically; if it persists, try rephrasing |
+| `[GUARDRAIL] DELEGATE_CHAT mentioned 'X.java' — overriding to EXECUTE` | Router mis-routed when a cached tool should have run | Automatic — guardrail forces re-routing to `EXECUTE` |
+| Tool compiles but produces wrong output | LLM logic error | Ask: *"The result was wrong. Fix [ToolName.java] to correctly handle [case]"* |
 
 ---
 
@@ -772,6 +761,15 @@ What tools have you built for me so far?
 | Internet access | — | Required for Gemini API and web search |
 | Disk space | ~50 MB | JBang dependency cache on first run |
 
+**JBang Dependencies (auto-resolved):**
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| `com.google.adk:google-adk` | `1.0.0-rc.1` | LLM agents + Google Search tool |
+| `info.picocli:picocli` | `4.7.5` | CLI parsing and ANSI output |
+| `com.google.code.gson:gson` | `2.10.1` | WorkflowPlan JSON parsing |
+| `org.slf4j:slf4j-simple` | `2.0.12` | Logging backend |
+
 ---
 
-*JForge V1.0 — Built with [Google ADK](https://github.com/google/adk-java), [JBang](https://jbang.dev), and [picocli](https://picocli.info).*
+*JForge V1.0 — Built with [Google ADK](https://github.com/google/adk-java), [JBang](https://jbang.dev), [picocli](https://picocli.info) and [Gson](https://github.com/google/gson).*
