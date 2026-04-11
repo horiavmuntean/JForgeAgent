@@ -1357,6 +1357,17 @@ public class JForgeAgent implements Callable<Integer> {
               {"id":"s4","goal":"Show weather for New York","dependsOn":["s1"]},
               {"id":"s5","goal":"Summarize these weather results in a clear comparison table: <<s2>> | <<s3>> | <<s4>>","dependsOn":["s2","s3","s4"]}
             ]}
+
+            EXAMPLE 4 — Mixed parallel + sequential pipeline with chaining and file output:
+            Goal: "Pesquise os preços atuais de BTC, ETH e SOL, calcule qual teria dado o maior retorno num investimento de R$1000 há 30 dias, e gere um relatório PDF"
+            {"goal":"Crypto ROI analysis and PDF report","steps":[
+              {"id":"s1","goal":"Search for current prices of BTC, ETH and SOL in USD","dependsOn":[]},
+              {"id":"s2","goal":"Search for prices of BTC, ETH and SOL 30 days ago in USD","dependsOn":[]},
+              {"id":"s3","goal":"Create a tool that calculates the ROI for a R$1000 investment in each crypto using: current=<<s1>> | past=<<s2>>","dependsOn":["s1","s2"]},
+              {"id":"s4","goal":"Execute the ROI calculator tool","dependsOn":["s3"]},
+              {"id":"s5","goal":"Create a tool that generates a PDF report with the ROI ranking from: <<s4>>","dependsOn":["s4"]},
+              {"id":"s6","goal":"Execute the PDF generator tool and save the report to products/","dependsOn":["s5"]}
+            ]}
             """;
 
     // ==================== AGENTE ====================
