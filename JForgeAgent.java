@@ -238,8 +238,8 @@ public class JForgeAgent implements Callable<Integer> {
         searcher = new Agent("searcher", searcherModel, SEARCHER_INSTRUCTION, new GoogleSearchTool());
         tester = new Agent("tester", testerModel, TESTER_INSTRUCTION);
 
-        status("@|faint [LLM] PRO  → supervisor, router, coder   [" + supervisorModel + "]|@");
-        status("@|faint [LLM] FAST → assistant, searcher, tester [" + assistantModel + "]|@");
+        status("@|faint [LLM] supervisor [" + supervisorModel + "]  router [" + routerModel + "]  coder [" + coderModel + "]|@");
+        status("@|faint [LLM] assistant  [" + assistantModel + "]  searcher [" + searcherModel + "]  tester [" + testerModel + "]|@");
         if (promptFlag != null && !promptFlag.isBlank()) {
             if (!silent)
                 printWelcome();
