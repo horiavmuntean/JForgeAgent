@@ -819,17 +819,17 @@ public class JForgeAgent implements Callable<Integer> {
         }
 
         String invocation = testResponse.substring(testResponse.indexOf("TEST_INVOCATION:") + 16).trim();
-        String[] parts = invocation.split("\\s+");
-        if (parts.length == 0 || parts[0].isBlank()) {
+        List<String> parts = tokenizeArgs(invocation);
+        if (parts.isEmpty() || parts.get(0).isBlank()) {
             logToFile("[TESTER] Empty invocation after parsing — skipping test.");
             return;
         }
-        String testToolName = parts[0];
+        String testToolName = parts.get(0);
         if (!isToolNameSafe(testToolName)) {
             logToFile("[TESTER] Unsafe tool name from tester agent '" + testToolName + "' — skipping test.");
             return;
         }
-        List<String> testArgs = Arrays.asList(Arrays.copyOfRange(parts, 1, parts.length));
+        List<String> testArgs = parts.subList(1, parts.size());
 
         ProcessResult testResult;
         try {
@@ -857,8 +857,13 @@ public class JForgeAgent implements Callable<Integer> {
             throws IOException, InterruptedException {
         status("@|bold,cyan [EXECUTE] |@" + routerAction);
 
-        String[] parts = routerAction.substring(actionColon + 1).trim().split("\\s+");
-        String toolName = parts[0];
+        List<String> parts = tokenizeArgs(routerAction.substring(actionColon + 1).trim());
+        if (parts.isEmpty()) {
+            logToFile("[WARN] handleExecute: empty command after EXECUTE:");
+            state.taskResolved = true;
+            return;
+        }
+        String toolName = parts.get(0);
         if (!isToolNameSafe(toolName)) {
             String msg = "Rejected unsafe tool name from LLM: '" + toolName + "'";
             status("@|bold,red [SECURITY] " + msg + "|@");
@@ -868,7 +873,7 @@ public class JForgeAgent implements Callable<Integer> {
         }
 
         // Filter JVM/jbang flags that the LLM could inject into script arguments
-        List<String> scriptArgs = Arrays.stream(parts, 1, parts.length)
+        List<String> scriptArgs = parts.subList(1, parts.size()).stream()
                 .filter(arg -> {
                     boolean blocked = BLOCKED_ARG_PREFIXES.stream().anyMatch(arg::startsWith);
                     if (blocked)
@@ -1036,6 +1041,32 @@ public class JForgeAgent implements Callable<Integer> {
         if (s == null)
             return "n/a";
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    /**
+     * Tokenizes a command string respecting double-quoted groups.
+     * Quotes are stripped from the returned tokens.
+     * Example: WeatherFetcher.java "Rio de Janeiro" → ["WeatherFetcher.java", "Rio de Janeiro"]
+     */
+    private static List<String> tokenizeArgs(String input) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (c == ' ' && !inQuotes) {
+                if (!current.isEmpty()) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (!current.isEmpty()) tokens.add(current.toString());
+        return tokens;
     }
 
     /**
