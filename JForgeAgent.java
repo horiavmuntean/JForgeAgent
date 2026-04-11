@@ -335,6 +335,15 @@ public class JForgeAgent implements Callable<Integer> {
 
         String rawJson = supervisor.invoke(buildSupervisorPrompt(userPrompt, state));
         WorkflowPlan plan = parseWorkflowPlan(rawJson);
+
+        // SIMPLE bypass: Supervisor decided no planning overhead is needed
+        if (plan != null && plan.isSimple()) {
+            status("@|bold,cyan [SUPERVISOR] Simple request — bypassing plan, routing directly.|@");
+            logToFile("[SUPERVISOR] SIMPLE bypass → processDemandRouter.");
+            processDemandRouter(userPrompt);
+            return;
+        }
+
         saveWorkflowPlan(rawJson, timestamp, "");
 
         if (plan == null || plan.steps().isEmpty()) {
@@ -463,7 +472,7 @@ public class JForgeAgent implements Callable<Integer> {
 
                 User Goal: %s
 
-                Generate a WorkflowPlan JSON.
+                Classify as SIMPLE or WORKFLOW and respond with JSON.
                 """,
                 WORKSPACE_TOPOLOGY, buildClock(), state.cacheList,
                 recentWorkflows.isEmpty() ? "None" : recentWorkflows,
@@ -500,6 +509,11 @@ public class JForgeAgent implements Callable<Integer> {
         try {
             Gson gson = new Gson();
             JsonObject root = gson.fromJson(trimmed, JsonObject.class);
+
+            // SIMPLE bypass sentinel
+            if ("SIMPLE".equals(jsonStr(root, "type", "")))
+                return new WorkflowPlan("__SIMPLE__", List.of());
+
             String goal = jsonStr(root, "goal", "");
 
             List<WorkflowStep> steps = new ArrayList<>();
@@ -1454,51 +1468,69 @@ public class JForgeAgent implements Callable<Integer> {
 
     private static final String SUPERVISOR_INSTRUCTION = """
             You are a Workflow Supervisor for a Java tool orchestrator.
-            Your ONLY job: decide whether the user's request needs a single step or a multi-step workflow,
-            and produce a WorkflowPlan JSON.
+            Your job: classify each user request as SIMPLE or WORKFLOW, then respond with JSON only.
 
             You do NOT decide HOW each step is implemented. A Router agent handles that automatically.
-            You only define WHAT each step should achieve and WHICH steps depend on others.
 
             Output ONLY valid JSON. No markdown, no code fences, no explanation.
 
+            ── SIMPLE bypass ────────────────────────────────────────────────────────
+            Use {"type":"SIMPLE"} when ALL of the following are true:
+              • At most one Router action is needed (a factual answer, a single known tool call, or a search)
+              • No output from one step needs to feed into another
+              • No parallel execution is worthwhile
+              • If a tool is needed, it is already listed in [Cached Tools]
+            Output:
+            {"type":"SIMPLE"}
+
+            ── WORKFLOW ─────────────────────────────────────────────────────────────
+            Use {"type":"WORKFLOW", ...} when ANY of the following is true:
+              • A new tool must be created (not in [Cached Tools]) before it can be executed
+              • Results from step A feed into step B  (chaining with <<stepId>>)
+              • Multiple independent sub-tasks benefit from parallel execution
+              • A file (PDF, CSV, …) must be generated as a final step combining earlier results
             Schema:
             {
+              "type": "WORKFLOW",
               "goal": "<one-line summary>",
               "steps": [
                 {
                   "id": "s1",
-                  "goal": "<sub-goal for this step — use <<sN>> to inject the output of step sN>",
+                  "goal": "<sub-goal — use <<sN>> to inject the output of step sN>",
                   "dependsOn": []
                 }
               ]
             }
 
-            Rules:
+            WORKFLOW rules:
             - id must be unique: s1, s2, s3, ...
             - dependsOn: IDs of steps that must finish before this one starts
-            - Steps with no mutual dependency run in parallel — use this for independent sub-tasks
+            - Steps with no mutual dependency run in parallel — use for independent sub-tasks
             - Use <<stepId>> in a goal to chain the output of a previous step
-            - For simple questions or single-tool requests, produce exactly ONE step
-            - For complex workflows, decompose into the minimum number of steps needed
-            - NEVER create separate steps for "create a tool" and "execute the tool" — the Router
+            - NEVER split "create a tool" and "execute the tool" into separate steps — the Router
               always creates AND executes in a single step. One deliverable = one step.
 
-            EXAMPLE 1 — Simple question (single step, Router uses the Assistant):
+            EXAMPLE A — SIMPLE: factual / conversational question
             Goal: "Who is the current president of the USA?"
-            {"goal":"Answer question about US president","steps":[
-              {"id":"s1","goal":"Who is the current president of the USA?","dependsOn":[]}
+            {"type":"SIMPLE"}
+
+            EXAMPLE B — SIMPLE: follow-up reusing a tool already in [Cached Tools]
+            Goal: "E do Etherium?" (CryptoPriceFetcher already in cache)
+            {"type":"SIMPLE"}
+
+            EXAMPLE C — SIMPLE: trivial question answerable from knowledge
+            Goal: "Que dia é hoje?"
+            {"type":"SIMPLE"}
+
+            EXAMPLE D — WORKFLOW (1 step): new tool required (not in cache)
+            Goal: "Show the current Bitcoin price"  (no price tool in [Cached Tools])
+            {"type":"WORKFLOW","goal":"Fetch current Bitcoin price","steps":[
+              {"id":"s1","goal":"Fetch and display the current price of Bitcoin in USD","dependsOn":[]}
             ]}
 
-            EXAMPLE 2 — Single tool request (single step, Router handles search/create/execute):
-            Goal: "Show the current Bitcoin price"
-            {"goal":"Fetch current Bitcoin price","steps":[
-              {"id":"s1","goal":"Fetch and display the current Bitcoin price in USD","dependsOn":[]}
-            ]}
-
-            EXAMPLE 3 — Complex workflow: create once, run in parallel, summarize:
+            EXAMPLE E — WORKFLOW (multi-step, parallel + sequential):
             Goal: "Get current weather for London, Tokyo and New York and summarize"
-            {"goal":"Multi-city weather summary","steps":[
+            {"type":"WORKFLOW","goal":"Multi-city weather summary","steps":[
               {"id":"s1","goal":"Create or use a weather tool that accepts a city name and shows temperature and conditions","dependsOn":[]},
               {"id":"s2","goal":"Show weather for London","dependsOn":["s1"]},
               {"id":"s3","goal":"Show weather for Tokyo","dependsOn":["s1"]},
@@ -1506,9 +1538,9 @@ public class JForgeAgent implements Callable<Integer> {
               {"id":"s5","goal":"Summarize these weather results in a clear comparison table: <<s2>> | <<s3>> | <<s4>>","dependsOn":["s2","s3","s4"]}
             ]}
 
-            EXAMPLE 4 — Mixed parallel + sequential pipeline with chaining and file output:
-            Goal: "Pesquise os preços atuais de BTC, ETH e SOL, calcule qual teria dado o maior retorno num investimento de R$1000 há 30 dias, e gere um relatório PDF"
-            {"goal":"Crypto ROI analysis and PDF report","steps":[
+            EXAMPLE F — WORKFLOW (parallel + sequential + file output):
+            Goal: "Pesquise os preços atuais de BTC, ETH e SOL, calcule o maior retorno num investimento de R$1000 há 30 dias e gere um PDF"
+            {"type":"WORKFLOW","goal":"Crypto ROI analysis and PDF report","steps":[
               {"id":"s1","goal":"Search for current prices of BTC, ETH and SOL in USD","dependsOn":[]},
               {"id":"s2","goal":"Search for prices of BTC, ETH and SOL 30 days ago in USD","dependsOn":[]},
               {"id":"s3","goal":"Fetch and display the ROI for a R$1000 investment in each crypto (current=<<s1>> | past=<<s2>>)","dependsOn":["s1","s2"]},
@@ -1749,5 +1781,7 @@ public class JForgeAgent implements Callable<Integer> {
 
     /** The full plan returned by the Supervisor. */
     private record WorkflowPlan(String goal, List<WorkflowStep> steps) {
+        /** True when the Supervisor decided no workflow planning is needed. */
+        boolean isSimple() { return "__SIMPLE__".equals(goal); }
     }
 }
