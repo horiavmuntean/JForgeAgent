@@ -74,16 +74,16 @@ public class JForgeAgent implements Callable<Integer> {
     private String defaultModel = null;
 
     @CommandLine.Option(names = {
-            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-flash")
-    private String supervisorModel = "gemini-2.5-flash";
+            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-3.1-pro)", defaultValue = "gemini-3.1-pro")
+    private String supervisorModel = "gemini-3.1-pro";
 
     @CommandLine.Option(names = {
-            "--router-model" }, description = "Model for Router agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
-    private String routerModel = "gemini-2.5-flash";
+            "--router-model" }, description = "Model for Router agent (default: gemini-3.1-pro)", defaultValue = "gemini-3.1-pro")
+    private String routerModel = "gemini-3.1-pro";
 
     @CommandLine.Option(names = {
-            "--coder-model" }, description = "Model for Coder agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
-    private String coderModel = "gemini-2.5-flash";
+            "--coder-model" }, description = "Model for Coder agent (default: gemini-3.1-pro)", defaultValue = "gemini-3.1-pro")
+    private String coderModel = "gemini-3.1-pro";
 
     @CommandLine.Option(names = {
             "--assistant-model" }, description = "Model for Assistant agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
@@ -136,7 +136,8 @@ public class JForgeAgent implements Callable<Integer> {
     };
 
     /**
-     * OS-specific system/hidden files that the guardrail must never move to products/.
+     * OS-specific system/hidden files that the guardrail must never move to
+     * products/.
      * Covers Windows (Thumbs.db, desktop.ini) and any future platform artefacts.
      */
     private static final Set<String> GUARDRAIL_IGNORED_FILES = Set.of(
@@ -223,22 +224,22 @@ public class JForgeAgent implements Callable<Integer> {
         // --model overrides all individual per-agent model options
         if (defaultModel != null && !defaultModel.isBlank()) {
             supervisorModel = defaultModel;
-            routerModel     = defaultModel;
-            coderModel      = defaultModel;
-            assistantModel  = defaultModel;
-            searcherModel   = defaultModel;
-            testerModel     = defaultModel;
+            routerModel = defaultModel;
+            coderModel = defaultModel;
+            assistantModel = defaultModel;
+            searcherModel = defaultModel;
+            testerModel = defaultModel;
         }
 
         supervisor = new Agent("supervisor", supervisorModel, SUPERVISOR_INSTRUCTION);
-        router     = new Agent("router",     routerModel,     ROUTER_INSTRUCTION);
-        coder      = new Agent("coder",      coderModel,      CODER_INSTRUCTION);
-        assistant  = new Agent("assistant",  assistantModel,  ASSISTANT_INSTRUCTION);
-        searcher   = new Agent("searcher",   searcherModel,   SEARCHER_INSTRUCTION, new GoogleSearchTool());
-        tester     = new Agent("tester",     testerModel,     TESTER_INSTRUCTION);
+        router = new Agent("router", routerModel, ROUTER_INSTRUCTION);
+        coder = new Agent("coder", coderModel, CODER_INSTRUCTION);
+        assistant = new Agent("assistant", assistantModel, ASSISTANT_INSTRUCTION);
+        searcher = new Agent("searcher", searcherModel, SEARCHER_INSTRUCTION, new GoogleSearchTool());
+        tester = new Agent("tester", testerModel, TESTER_INSTRUCTION);
 
         status("@|faint [LLM] PRO  → supervisor, router, coder   [" + supervisorModel + "]|@");
-        status("@|faint [LLM] FAST → assistant, searcher, tester [" + assistantModel  + "]|@");
+        status("@|faint [LLM] FAST → assistant, searcher, tester [" + assistantModel + "]|@");
         if (promptFlag != null && !promptFlag.isBlank()) {
             if (!silent)
                 printWelcome();
@@ -395,12 +396,15 @@ public class JForgeAgent implements Callable<Integer> {
         }
     }
 
-    /** Persists the raw WorkflowPlan JSON to logs/workflow_<timestamp><suffix>.json */
+    /**
+     * Persists the raw WorkflowPlan JSON to logs/workflow_<timestamp><suffix>.json
+     */
     private void saveWorkflowPlan(String rawJson, String timestamp, String suffix) {
-        if (rawJson == null || rawJson.isBlank()) return;
+        if (rawJson == null || rawJson.isBlank())
+            return;
         // Extract only the JSON block (strip any prose the LLM may have added)
         int start = rawJson.indexOf('{');
-        int end   = rawJson.lastIndexOf('}');
+        int end = rawJson.lastIndexOf('}');
         String json = (start != -1 && end > start) ? rawJson.substring(start, end + 1) : rawJson;
         Path file = LOGS_DIR.resolve("workflow_" + timestamp + suffix + ".json");
         try {
@@ -447,16 +451,19 @@ public class JForgeAgent implements Callable<Integer> {
     }
 
     /**
-     * Extracts and parses the JSON WorkflowPlan from a (possibly decorated) LLM response.
+     * Extracts and parses the JSON WorkflowPlan from a (possibly decorated) LLM
+     * response.
      * Returns null on any parse failure — callers must handle gracefully.
      */
     private WorkflowPlan parseWorkflowPlan(String json) {
-        if (json == null || json.isBlank()) return null;
+        if (json == null || json.isBlank())
+            return null;
 
         // Extract the outermost {...} block (LLM may wrap JSON in prose)
         int start = json.indexOf('{');
         int end = json.lastIndexOf('}');
-        if (start == -1 || end == -1 || end <= start) return null;
+        if (start == -1 || end == -1 || end <= start)
+            return null;
         String trimmed = json.substring(start, end + 1);
 
         try {
@@ -474,7 +481,8 @@ public class JForgeAgent implements Callable<Integer> {
 
                     List<String> dependsOn = new ArrayList<>();
                     if (s.has("dependsOn"))
-                        for (var d : s.getAsJsonArray("dependsOn")) dependsOn.add(d.getAsString());
+                        for (var d : s.getAsJsonArray("dependsOn"))
+                            dependsOn.add(d.getAsString());
 
                     steps.add(new WorkflowStep(id, stepGoal, dependsOn));
                 }
@@ -526,12 +534,18 @@ public class JForgeAgent implements Callable<Integer> {
 
     // ==================== ORCHESTRATION ====================
 
-    /** Entry point for every user request — delegates to the Supervisor+WorkflowExecutor pipeline. */
+    /**
+     * Entry point for every user request — delegates to the
+     * Supervisor+WorkflowExecutor pipeline.
+     */
     private void processDemand(String userPrompt) throws Exception {
         supervisorWorkflow(userPrompt);
     }
 
-    /** Legacy Router loop — used as fallback when the Supervisor fails to produce a valid plan. */
+    /**
+     * Legacy Router loop — used as fallback when the Supervisor fails to produce a
+     * valid plan.
+     */
     private void processDemandRouter(String userPrompt) throws Exception {
         LoopState state = new LoopState();
 
@@ -945,9 +959,12 @@ public class JForgeAgent implements Callable<Integer> {
                         try {
                             if (Files.isRegularFile(p)) {
                                 String name = p.getFileName().toString();
-                                if (name.startsWith(".")) return;                    // macOS/Linux hidden files (.DS_Store etc.)
-                                if (GUARDRAIL_IGNORED_FILES.contains(name.toLowerCase())) return; // Windows system files
-                                if (name.endsWith(".java") || name.endsWith(".meta.json")) return;
+                                if (name.startsWith("."))
+                                    return; // macOS/Linux hidden files (.DS_Store etc.)
+                                if (GUARDRAIL_IGNORED_FILES.contains(name.toLowerCase()))
+                                    return; // Windows system files
+                                if (name.endsWith(".java") || name.endsWith(".meta.json"))
+                                    return;
                                 // Output file found inside tools/ — relocate to products/
                                 Path dest = PRODUCTS_DIR.resolve(p.getFileName());
                                 Files.move(p, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -1130,18 +1147,22 @@ public class JForgeAgent implements Callable<Integer> {
         String pathEnv = System.getenv("PATH");
         if (pathEnv != null && !pathEnv.isBlank()) {
             for (String entry : pathEnv.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))) {
-                if (entry == null || entry.isBlank()) continue;
+                if (entry == null || entry.isBlank())
+                    continue;
                 Path dir = Path.of(entry.trim());
                 addJbangCandidates(dir, windows, candidates);
             }
         }
 
         for (Path candidate : candidates) {
-            if (!Files.isRegularFile(candidate)) continue;
-            if (!Files.isExecutable(candidate) && !candidate.toString().endsWith(".ps1")) continue;
+            if (!Files.isRegularFile(candidate))
+                continue;
+            if (!Files.isExecutable(candidate) && !candidate.toString().endsWith(".ps1"))
+                continue;
             String normalized = candidate.toString();
             if (normalized.toLowerCase().endsWith(".ps1")) {
-                return new ArrayList<>(List.of("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", normalized));
+                return new ArrayList<>(
+                        List.of("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", normalized));
             }
             return new ArrayList<>(List.of(normalized));
         }
@@ -1472,7 +1493,8 @@ public class JForgeAgent implements Callable<Integer> {
         final Map<String, String> stepResults = new HashMap<>();
     }
 
-    private record ProcessResult(boolean success, String output) {}
+    private record ProcessResult(boolean success, String output) {
+    }
 
     // ==================== WORKFLOW EXECUTOR ====================
 
@@ -1480,14 +1502,17 @@ public class JForgeAgent implements Callable<Integer> {
      * Executes a WorkflowPlan by delegating each step to the Router loop.
      *
      * Architecture:
-     *   Supervisor  →  decides WHAT to do and in what order (sub-goals + dependencies)
-     *   Router      →  decides HOW to achieve each sub-goal (SEARCH/CREATE/EXECUTE/CHAT)
+     * Supervisor → decides WHAT to do and in what order (sub-goals + dependencies)
+     * Router → decides HOW to achieve each sub-goal (SEARCH/CREATE/EXECUTE/CHAT)
      *
      * Execution model:
-     *   - Steps are grouped into topological layers via dependency analysis.
-     *   - Steps in the same layer (no mutual dependency) run in parallel via VirtualThreads.
-     *   - Each step gets its own Router loop (processDemandRouter) with isolated LoopState.
-     *   - ${stepId} placeholders in a step's goal are replaced with the output of that step.
+     * - Steps are grouped into topological layers via dependency analysis.
+     * - Steps in the same layer (no mutual dependency) run in parallel via
+     * VirtualThreads.
+     * - Each step gets its own Router loop (processDemandRouter) with isolated
+     * LoopState.
+     * - ${stepId} placeholders in a step's goal are replaced with the output of
+     * that step.
      */
     private class WorkflowExecutor {
 
@@ -1495,7 +1520,8 @@ public class JForgeAgent implements Callable<Integer> {
         private final Map<String, String> stepResults = new ConcurrentHashMap<>();
 
         /**
-         * @return true if all steps completed; false if a step failed and replan is needed.
+         * @return true if all steps completed; false if a step failed and replan is
+         *         needed.
          */
         boolean execute(WorkflowPlan plan, LoopState workflowState) throws Exception {
             List<List<WorkflowStep>> layers = buildExecutionLayers(plan.steps());
@@ -1527,7 +1553,8 @@ public class JForgeAgent implements Callable<Integer> {
                 return executeSingleStep(layer.get(0), workflowState);
             }
 
-            // Parallel execution: one VirtualThread per step, each with an isolated Router loop
+            // Parallel execution: one VirtualThread per step, each with an isolated Router
+            // loop
             try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
                 var futures = layer.stream()
                         .map(step -> pool.submit(() -> executeSingleStep(step, workflowState)))
@@ -1535,7 +1562,8 @@ public class JForgeAgent implements Callable<Integer> {
 
                 boolean allOk = true;
                 for (var f : futures) {
-                    if (!f.get()) allOk = false;
+                    if (!f.get())
+                        allOk = false;
                 }
                 return allOk;
             }
@@ -1567,19 +1595,22 @@ public class JForgeAgent implements Callable<Integer> {
             logToFile("[STEP " + step.id() + "] result: " + truncate(output, 200));
 
             boolean ok = !output.isBlank();
-            if (!ok) workflowState.lastError = "[STEP " + step.id() + "] produced no output — possible LLM failure.";
+            if (!ok)
+                workflowState.lastError = "[STEP " + step.id() + "] produced no output — possible LLM failure.";
             return ok;
         }
 
         /**
          * Topological sort: assigns each step a "level" = max(dependsOn levels) + 1.
-         * Steps sharing the same level have no mutual dependency and form a parallel layer.
+         * Steps sharing the same level have no mutual dependency and form a parallel
+         * layer.
          */
         private List<List<WorkflowStep>> buildExecutionLayers(List<WorkflowStep> steps) {
             Map<String, WorkflowStep> byId = steps.stream()
                     .collect(Collectors.toMap(WorkflowStep::id, s -> s));
             Map<String, Integer> levels = new HashMap<>();
-            for (WorkflowStep s : steps) computeLevel(s, byId, levels);
+            for (WorkflowStep s : steps)
+                computeLevel(s, byId, levels);
 
             Map<Integer, List<WorkflowStep>> layerMap = new LinkedHashMap<>();
             for (WorkflowStep s : steps)
@@ -1590,7 +1621,8 @@ public class JForgeAgent implements Callable<Integer> {
 
         private int computeLevel(WorkflowStep step, Map<String, WorkflowStep> byId,
                 Map<String, Integer> levels) {
-            if (levels.containsKey(step.id())) return levels.get(step.id());
+            if (levels.containsKey(step.id()))
+                return levels.get(step.id());
             int level = step.dependsOn().stream()
                     .filter(byId::containsKey)
                     .mapToInt(depId -> computeLevel(byId.get(depId), byId, levels) + 1)
@@ -1601,7 +1633,8 @@ public class JForgeAgent implements Callable<Integer> {
 
         /** Replaces <<stepId>> placeholders with the captured output of that step. */
         private String resolveChaining(String text, Map<String, String> results) {
-            if (text == null) return "";
+            if (text == null)
+                return "";
             for (var e : results.entrySet())
                 text = text.replace("<<" + e.getKey() + ">>", e.getValue());
             return text;
@@ -1612,15 +1645,18 @@ public class JForgeAgent implements Callable<Integer> {
 
     /**
      * One task inside a WorkflowPlan.
-     * The Router decides HOW to achieve the goal (SEARCH / CREATE / EXECUTE / CHAT).
+     * The Router decides HOW to achieve the goal (SEARCH / CREATE / EXECUTE /
+     * CHAT).
      * The Supervisor only decides WHAT to achieve and in what order.
      */
     private record WorkflowStep(
-            String id,           // unique identifier: s1, s2, ...
-            String goal,         // sub-goal delegated to the Router (may contain ${stepId} placeholders)
-            List<String> dependsOn  // step IDs that must complete before this one
-    ) {}
+            String id, // unique identifier: s1, s2, ...
+            String goal, // sub-goal delegated to the Router (may contain ${stepId} placeholders)
+            List<String> dependsOn // step IDs that must complete before this one
+    ) {
+    }
 
     /** The full plan returned by the Supervisor. */
-    private record WorkflowPlan(String goal, List<WorkflowStep> steps) {}
+    private record WorkflowPlan(String goal, List<WorkflowStep> steps) {
+    }
 }
