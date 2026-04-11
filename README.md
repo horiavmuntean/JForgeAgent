@@ -475,12 +475,12 @@ jbang JForgeAgent.java [OPTIONS]
 | Option | Default | Description |
 |---|---|---|
 | `--model <model>` | — | Override Gemini model for **all** agents (disables per-agent defaults) |
-| `--supervisor-model` | `gemini-1.5-pro` | Model for the Supervisor agent |
-| `--router-model` | `gemini-1.5-pro` | Model for the Router agent |
-| `--coder-model` | `gemini-1.5-pro` | Model for the Coder agent |
-| `--assistant-model` | `gemini-2.0-flash` | Model for the Assistant agent |
-| `--searcher-model` | `gemini-2.0-flash` | Model for the Searcher agent |
-| `--tester-model` | `gemini-2.0-flash` | Model for the Tester agent |
+| `--supervisor-model` | `gemini-2.5-pro` | Model for the Supervisor agent |
+| `--router-model` | `gemini-2.5-pro` | Model for the Router agent |
+| `--coder-model` | `gemini-2.5-pro` | Model for the Coder agent |
+| `--assistant-model` | `gemini-2.5-flash` | Model for the Assistant agent |
+| `--searcher-model` | `gemini-2.5-flash` | Model for the Searcher agent |
+| `--tester-model` | `gemini-2.5-flash` | Model for the Tester agent |
 | `--max-tools <n>` | `10` | Maximum cached tools before GC count-eviction |
 | `--tool-age-days <n>` | `30` | Days of inactivity before a tool is eligible for deletion |
 | `--prompt <text>` | — | Run a single prompt non-interactively and exit (CI/CD mode) |
@@ -489,7 +489,7 @@ jbang JForgeAgent.java [OPTIONS]
 | `-V`, `--version` | — | Print version and exit |
 | `-h`, `--help` | — | Print help and exit |
 
-By default, agents that require deep reasoning (Supervisor, Router, Coder) use `gemini-2.5-pro-preview`, while agents with simpler tasks (Assistant, Searcher, Tester) use `gemini-2.0-flash`.
+By default, agents that require deep reasoning (Supervisor, Router, Coder) use `gemini-2.5-pro`, while agents with simpler tasks (Assistant, Searcher, Tester) use `gemini-2.5-flash`.
 
 **Examples:**
 

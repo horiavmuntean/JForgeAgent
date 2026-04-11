@@ -74,28 +74,28 @@ public class JForgeAgent implements Callable<Integer> {
     private String defaultModel = null;
 
     @CommandLine.Option(names = {
-            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-1.5-pro)", defaultValue = "gemini-1.5-pro")
-    private String supervisorModel = "gemini-1.5-pro";
+            "--supervisor-model" }, description = "Model for Supervisor agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
+    private String supervisorModel = "gemini-2.5-pro";
 
     @CommandLine.Option(names = {
-            "--router-model" }, description = "Model for Router agent (default: gemini-1.5-pro)", defaultValue = "gemini-1.5-pro")
-    private String routerModel = "gemini-1.5-pro";
+            "--router-model" }, description = "Model for Router agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
+    private String routerModel = "gemini-2.5-pro";
 
     @CommandLine.Option(names = {
-            "--coder-model" }, description = "Model for Coder agent (default: gemini-1.5-pro)", defaultValue = "gemini-1.5-pro")
-    private String coderModel = "gemini-1.5-pro";
+            "--coder-model" }, description = "Model for Coder agent (default: gemini-2.5-pro)", defaultValue = "gemini-2.5-pro")
+    private String coderModel = "gemini-2.5-pro";
 
     @CommandLine.Option(names = {
-            "--assistant-model" }, description = "Model for Assistant agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
-    private String assistantModel = "gemini-2.0-flash";
+            "--assistant-model" }, description = "Model for Assistant agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
+    private String assistantModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
-            "--searcher-model" }, description = "Model for Searcher agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
-    private String searcherModel = "gemini-2.0-flash";
+            "--searcher-model" }, description = "Model for Searcher agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
+    private String searcherModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
-            "--tester-model" }, description = "Model for Tester agent (default: gemini-2.0-flash)", defaultValue = "gemini-2.0-flash")
-    private String testerModel = "gemini-2.0-flash";
+            "--tester-model" }, description = "Model for Tester agent (default: gemini-2.5-flash)", defaultValue = "gemini-2.5-flash")
+    private String testerModel = "gemini-2.5-flash";
 
     @CommandLine.Option(names = {
             "--max-tools" }, description = "Maximum number of cached tools before GC eviction (default: 10)", defaultValue = "10")
