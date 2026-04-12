@@ -1560,6 +1560,11 @@ public class JForgeAgent implements Callable<Integer> {
             (President, Weather, Prices, Status) MUST be preceded by a SEARCH if
             [RAG Search Results] is empty or stale. Do NOT use DELEGATE_CHAT for
             time-sensitive facts without corroborating search results.
+
+            ENVIRONMENTAL INTERVENTION RULE: If a FAILURE trace (state.lastError)
+            indicates missing API keys, env vars, secrets, or unauthorized access,
+            do NOT use EDIT or CREATE. Use DELEGATE_CHAT to inform the user and
+            request the missing information.
             """;
 
     private static final String CODER_INSTRUCTION = """
@@ -1587,6 +1592,11 @@ public class JForgeAgent implements Callable<Integer> {
             A tool must produce correct results for any valid input of the same type, not just the one from
             the original request. The tool name must reflect its generic purpose (e.g. WeatherFetcher.java,
             not RioWeatherFetcher.java).
+
+            CRITICAL - NO SILENCING: Do not "fix" environmental errors (missing
+            credentials/secrets) by making the tool exit successfully with a
+            warning. It MUST fail explicitly so the orchestrator can detect the
+            missing requirement.
             """;
 
     private static final String ASSISTANT_INSTRUCTION = """
@@ -1597,6 +1607,11 @@ public class JForgeAgent implements Callable<Integer> {
             Never generate entire Java code files. Code automation is handled by another agent.
             DO NOT mention specific tool filenames (like Tool.java) from the cached list unless you are explicitly asked about your available tools.
             Keep your text crisp, beautifully formatted (Markdown is allowed here), and highly helpful.
+
+            CLARIFICATION & INTERVENTION: If you are called because a tool failed
+            due to missing configuration (keys, env vars), focus your response on
+            explaining what is missing and provide clear instructions on how the
+            user can resolve it.
             """;
 
     private static final String SEARCHER_INSTRUCTION = """
