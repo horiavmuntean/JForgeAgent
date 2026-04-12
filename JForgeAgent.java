@@ -67,6 +67,9 @@ public class JForgeAgent implements Callable<Integer> {
     private static final int MAX_LOOP_ITERATIONS_CONST = 10;
     private static final int MAX_SEARCH_PER_DEMAND_CONST = 3;
     private static final int MAX_TOOL_TIMEOUT_CONST = 120;
+    private static final int MAX_REPLANS = 2;
+    private static final int MAX_CRASH_RETRIES = 3;        // abort after 3 failures (2 repair attempts)
+    private static final int MAX_WORKFLOWS_IN_CONTEXT = 3; // workflows shown in Supervisor prompt (keep small)
 
     // ==================== CLI OPTIONS ====================
 
@@ -113,6 +116,14 @@ public class JForgeAgent implements Callable<Integer> {
     @CommandLine.Option(names = {
             "--silent" }, description = "Suppress all status/decorative output; print only the final result (for pipe/MCP/A2A use)", defaultValue = "false")
     private boolean silent = false;
+
+    @CommandLine.Option(names = {
+            "--max-workflows" }, description = "Maximum number of cached workflows before GC eviction (default: 10)", defaultValue = "10")
+    private int maxWorkflows = 10;
+
+    @CommandLine.Option(names = {
+            "--workflow-age-days" }, description = "Days before an unused workflow is eligible for GC deletion (default: 30)", defaultValue = "30")
+    private long maxWorkflowAgeDays = 30;
 
     private static final int MAX_MEMORY_ENTRIES = MAX_MEMORY_ENTRIES_CONST;
     private static final int MAX_HISTORY_CHARS = MAX_HISTORY_CHARS_CONST;
@@ -217,6 +228,15 @@ public class JForgeAgent implements Callable<Integer> {
         Files.createDirectories(MEMORY_DIR);
 
         initLogging();
+        // Route ADK's SLF4J output into our session log — must be set before first
+        // SLF4J use (SimpleLoggerFactory initialises lazily, so this window is safe).
+        System.setProperty("org.slf4j.simpleLogger.logFile",        currentSessionLog.toAbsolutePath().toString());
+        System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn");
+        System.setProperty("org.slf4j.simpleLogger.showDateTime",    "true");
+        System.setProperty("org.slf4j.simpleLogger.dateTimeFormat",  "HH:mm:ss");
+        System.setProperty("org.slf4j.simpleLogger.showLogName",     "false");
+        System.setProperty("org.slf4j.simpleLogger.showThreadName",  "false");
+        System.setProperty("org.slf4j.simpleLogger.levelInBrackets", "true");
         loadMemory();
 
         supervisor = new Agent("supervisor", supervisorModel, SUPERVISOR_INSTRUCTION);
@@ -327,7 +347,6 @@ public class JForgeAgent implements Callable<Integer> {
      * parsed at all, falls back to the legacy Router loop.
      */
     private void supervisorWorkflow(String userPrompt) throws Exception {
-        final int MAX_REPLANS = 2;
         status("@|bold,cyan [SUPERVISOR] Decomposing goal into workflow...|@");
 
         LoopState state = new LoopState();
@@ -335,6 +354,30 @@ public class JForgeAgent implements Callable<Integer> {
 
         String rawJson = supervisor.invoke(buildSupervisorPrompt(userPrompt, state));
         WorkflowPlan plan = parseWorkflowPlan(rawJson);
+
+        // REUSE: Supervisor matched a stored workflow — skip planning, load from disk
+        if (rawJson.contains("\"type\":\"REUSE\"")) {
+            try {
+                String id = new com.google.gson.Gson()
+                        .fromJson(rawJson.substring(rawJson.indexOf('{')), com.google.gson.JsonObject.class)
+                        .get("id").getAsString();
+                WorkflowPlan reused = loadWorkflowById(id);
+                if (reused != null && !reused.steps().isEmpty()) {
+                    status("@|bold,cyan [SUPERVISOR] Reusing stored workflow: |@" + id);
+                    logToFile("[SUPERVISOR] REUSE → " + id);
+                    plan = reused;
+                    // skip saveWorkflowPlan — plan already persisted
+                    logToFile("[SUPERVISOR] Plan '" + plan.goal() + "' | " + plan.steps().size() + " steps");
+                    status("@|bold,cyan [SUPERVISOR] " + plan.steps().size() + " steps planned for: "
+                            + truncate(plan.goal(), 80) + "|@");
+                    runWorkflowPlan(plan, state, userPrompt);
+                    return;
+                }
+                logToFile("[SUPERVISOR] REUSE target not found (" + id + ") — falling back to new plan.");
+            } catch (Exception e) {
+                logToFile("[WARN] REUSE parse failed: " + e.getMessage() + " — continuing with new plan.");
+            }
+        }
 
         // SIMPLE bypass: Supervisor decided no planning overhead is needed
         if (plan != null && plan.isSimple()) {
@@ -357,6 +400,13 @@ public class JForgeAgent implements Callable<Integer> {
         status("@|bold,cyan [SUPERVISOR] " + plan.steps().size() + " steps planned for: "
                 + truncate(plan.goal(), 80) + "|@");
 
+        runWorkflowPlan(plan, state, userPrompt);
+    }
+
+    /** Execute + replan loop shared by the normal WORKFLOW path and the REUSE path. */
+    private void runWorkflowPlan(WorkflowPlan initialPlan, LoopState state, String userPrompt) throws Exception {
+        WorkflowPlan plan = initialPlan;
+        String timestamp = LocalDateTime.now().format(FMT_LOG_TS);
         for (int replan = 0; replan <= MAX_REPLANS; replan++) {
             boolean ok = new WorkflowExecutor().execute(plan, state);
             if (ok) {
@@ -367,22 +417,19 @@ public class JForgeAgent implements Callable<Integer> {
             }
 
             if (replan == MAX_REPLANS) {
-                status("@|bold,red [SUPERVISOR] Max replans (" + MAX_REPLANS
-                        + ") reached. Aborting.|@");
-                logToFile("[SUPERVISOR] Max replans exceeded. Last error: "
-                        + truncate(state.lastError, 300));
+                status("@|bold,red [SUPERVISOR] Max replans (" + MAX_REPLANS + ") reached. Aborting.|@");
+                logToFile("[SUPERVISOR] Max replans exceeded. Last error: " + truncate(state.lastError, 300));
                 break;
             }
 
             status("@|bold,yellow [SUPERVISOR] Replanning (" + (replan + 1) + "/" + MAX_REPLANS
                     + ") due to: " + truncate(state.lastError, 80) + "|@");
-            logToFile("[SUPERVISOR] Replan " + (replan + 1) + ". Error: "
-                    + truncate(state.lastError, 200));
+            logToFile("[SUPERVISOR] Replan " + (replan + 1) + ". Error: " + truncate(state.lastError, 200));
 
             String prevError = state.lastError;
             state.lastError = null;
 
-            rawJson = supervisor.invoke(buildSupervisorReplanPrompt(userPrompt, plan, prevError, state));
+            String rawJson = supervisor.invoke(buildSupervisorReplanPrompt(userPrompt, plan, prevError, state));
             plan = parseWorkflowPlan(rawJson);
             saveWorkflowPlan(rawJson, timestamp, "_replan" + (replan + 1));
 
@@ -399,6 +446,8 @@ public class JForgeAgent implements Callable<Integer> {
     /**
      * Persists a successful WorkflowPlan JSON to workflows/workflow_<timestamp>.json.
      * Replans are saved to logs/ only (debugging), not to workflows/ (not reusable patterns).
+     * When a replan occurs the failure counter in the base workflow's .fail.json sidecar
+     * is incremented so the Supervisor can deprioritise repeatedly-failing patterns.
      */
     private void saveWorkflowPlan(String rawJson, String timestamp, String suffix) {
         if (rawJson == null || rawJson.isBlank())
@@ -415,6 +464,35 @@ public class JForgeAgent implements Callable<Integer> {
         } catch (IOException e) {
             logToFile("[WARN] Could not save workflow plan: " + e.getMessage());
         }
+        // Bump failure counter for the base workflow whenever a replan is triggered
+        if (!suffix.isEmpty()) {
+            Path baseFile = WORKFLOWS_DIR.resolve("workflow_" + timestamp + ".json");
+            bumpWorkflowFailCount(baseFile);
+        }
+    }
+
+    /** Increments the integer stored in {@code workflowFile.fail.json} by 1. Creates the sidecar with value 1 if absent. */
+    private void bumpWorkflowFailCount(Path workflowFile) {
+        Path failFile = WORKFLOWS_DIR.resolve(
+                workflowFile.getFileName().toString().replace(".json", ".fail.json"));
+        int count = readWorkflowFailCount(workflowFile);
+        try {
+            Files.writeString(failFile, String.valueOf(count + 1));
+        } catch (IOException e) {
+            logToFile("[WARN] bumpWorkflowFailCount: " + e.getMessage());
+        }
+    }
+
+    /** Returns the failure count from {@code workflowFile.fail.json}, or 0 if the sidecar is absent or unreadable. */
+    private int readWorkflowFailCount(Path workflowFile) {
+        Path failFile = WORKFLOWS_DIR.resolve(
+                workflowFile.getFileName().toString().replace(".json", ".fail.json"));
+        if (!Files.exists(failFile)) return 0;
+        try {
+            return Integer.parseInt(Files.readString(failFile).strip());
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**
@@ -423,20 +501,16 @@ public class JForgeAgent implements Callable<Integer> {
      */
     private String loadRecentWorkflows() {
         try {
-            if (!Files.exists(WORKFLOWS_DIR)) return "";
-            List<Path> files;
-            try (Stream<Path> s = Files.list(WORKFLOWS_DIR)) {
-                files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
-                         .sorted(BY_MTIME_DESC)
-                         .limit(3)
-                         .toList();
-            }
+            List<Path> files = listArtifactsByMtime(WORKFLOWS_DIR, ".json", MAX_WORKFLOWS_IN_CONTEXT);
             if (files.isEmpty()) return "";
             var sb = new StringBuilder();
             for (Path f : files) {
                 WorkflowPlan plan = parseWorkflowPlan(Files.readString(f));
                 if (plan == null || plan.steps().isEmpty()) continue;
-                sb.append("Goal: ").append(plan.goal()).append("\n");
+                sb.append("id: ").append(f.getFileName());
+                int failCount = readWorkflowFailCount(f);
+                if (failCount > 0) sb.append(" [failed ").append(failCount).append("x]");
+                sb.append("\nGoal: ").append(plan.goal()).append("\n");
                 sb.append("Steps: ").append(plan.steps().stream()
                         .map(step -> truncate(step.goal(), 60))
                         .collect(Collectors.joining(" → ")));
@@ -449,20 +523,26 @@ public class JForgeAgent implements Callable<Integer> {
         }
     }
 
+    /** Loads and parses a stored workflow by filename from workflows/. Returns null if missing or unparseable. */
+    private WorkflowPlan loadWorkflowById(String id) {
+        if (id == null || id.isBlank()) return null;
+        Path file = WORKFLOWS_DIR.resolve(id);
+        if (!Files.exists(file)) return null;
+        try {
+            return parseWorkflowPlan(Files.readString(file));
+        } catch (IOException e) {
+            logToFile("[WARN] loadWorkflowById(" + id + "): " + e.getMessage());
+            return null;
+        }
+    }
+
     private String buildSupervisorPrompt(String userGoal, LoopState state) {
         if (state.cacheList == null)
             state.cacheList = listCachedTools().stream()
                     .reduce((a, b) -> a + ",\n" + b).orElse("Empty");
         String recentWorkflows = loadRecentWorkflows();
         return String.format("""
-                [Workspace Topology]
                 %s
-
-                [System Clock]
-                %s
-
-                [Cached Tools]
-                [%s]
 
                 [Recent Successful Workflows]
                 %s
@@ -472,9 +552,9 @@ public class JForgeAgent implements Callable<Integer> {
 
                 User Goal: %s
 
-                Classify as SIMPLE or WORKFLOW and respond with JSON.
+                Classify as SIMPLE, REUSE, or WORKFLOW and respond with JSON.
                 """,
-                WORKSPACE_TOPOLOGY, buildClock(), state.cacheList,
+                buildSystemContext(),
                 recentWorkflows.isEmpty() ? "None" : recentWorkflows,
                 buildHistory(), userGoal);
     }
@@ -603,11 +683,10 @@ public class JForgeAgent implements Callable<Integer> {
                 break;
             }
 
-            String clock = buildClock();
             if (state.cacheList == null)
                 state.cacheList = listCachedTools().stream().reduce((a, b) -> a + ",\n" + b).orElse("Empty");
 
-            String statePrompt = buildStatePrompt(userPrompt, state, clock, state.cacheList);
+            String statePrompt = buildStatePrompt(userPrompt, state, state.cacheList);
 
             status("@|bold,blue [ROUTER] Analyzing Intent and Metadata Schemas...|@");
             String routerAction = router.invoke(statePrompt);
@@ -626,7 +705,7 @@ public class JForgeAgent implements Callable<Integer> {
             String command = (colon != -1 ? routerAction.substring(0, colon) : routerAction).trim();
 
             switch (command) {
-                case "DELEGATE_CHAT" -> handleDelegateChat(userPrompt, clock, state);
+                case "DELEGATE_CHAT" -> handleDelegateChat(userPrompt, state);
                 case "SEARCH" -> handleSearch(routerAction.substring(colon + 1).trim(), state);
                 case "EDIT" -> handleEdit(routerAction.substring(colon + 1).trim(), state);
                 case "CREATE" -> handleCreate(routerAction.substring(colon + 1).trim(), state);
@@ -662,22 +741,22 @@ public class JForgeAgent implements Callable<Integer> {
         return String.join("\n", selected);
     }
 
+    private String buildSystemContext() {
+        return "[System Clock]\n" + buildClock() + "\n\n" + WORKSPACE_TOPOLOGY;
+    }
+
     private String buildClock() {
         return LocalDateTime.now().format(FMT_CLOCK)
                 + " | Local System Zone: " + java.time.ZoneId.systemDefault();
     }
 
-    private String buildStatePrompt(String userPrompt, LoopState state, String clock, String cacheList) {
+    private String buildStatePrompt(String userPrompt, LoopState state, String cacheList) {
         String fallbackText = state.lastError == null ? "No previous errors."
                 : "A FAILURE OCCURRED IN THE LAST EXECUTION WITH THE FOLLOWING TRACE. REQUIRED FIX: " + state.lastError;
         String historyList = buildHistory();
         String ragSection = state.ragContext.isEmpty() ? "No recent searches." : state.ragContext;
 
         return String.format("""
-                [Workspace Topology]
-                %s
-
-                [System Clock]
                 %s
 
                 [Recent Chat History]
@@ -693,16 +772,16 @@ public class JForgeAgent implements Callable<Integer> {
                 %s
                 Original User Request: %s
                 Decide next action: EXECUTE, CREATE, EDIT, SEARCH, or DELEGATE_CHAT.
-                """, WORKSPACE_TOPOLOGY, clock, historyList, cacheList, ragSection, fallbackText, userPrompt);
+                """, buildSystemContext(), historyList, cacheList, ragSection, fallbackText, userPrompt);
     }
 
     // ==================== HANDLERS ====================
 
-    private void handleDelegateChat(String userPrompt, String clock, LoopState state) {
+    private void handleDelegateChat(String userPrompt, LoopState state) {
         status("@|bold,yellow \uD83D\uDCAC [ASSISTANT] Generating intelligent response...|@");
 
         String chatMessage = assistant
-                .invoke(buildAssistantPrompt(userPrompt, state.ragContext, state.cacheList, clock));
+                .invoke(buildAssistantPrompt(userPrompt, state.ragContext, state.cacheList));
 
         // ── GUARDRAIL: if the assistant mentions a real cached tool, redirect to
         // EXECUTE ──
@@ -908,7 +987,7 @@ public class JForgeAgent implements Callable<Integer> {
         } else {
             status("@|bold,red Tool Execution Failed. Returning trace to Router for analysis...|@");
             state.crashRetries++;
-            if (state.crashRetries > 2) {
+            if (state.crashRetries >= MAX_CRASH_RETRIES) {
                 status("@|bold,red Maximum retry limit reached (" + state.crashRetries
                         + "). Architecture failed to heal!|@");
                 logToFile("[SYSTEM] Auto-heal limits exceeded."
@@ -983,9 +1062,9 @@ public class JForgeAgent implements Callable<Integer> {
         return prompt;
     }
 
-    private String buildAssistantPrompt(String userPrompt, String ragContext, String toolsList, String clock) {
-        String prompt = "Original Request: " + userPrompt + "\n\n[Local System Clock]: " + clock;
-        if (!toolsList.equals("Empty"))
+    private String buildAssistantPrompt(String userPrompt, String ragContext, String toolsList) {
+        String prompt = buildSystemContext() + "\n\nOriginal Request: " + userPrompt;
+        if (toolsList != null && !toolsList.equals("Empty"))
             prompt += "\n\n[System State - Available Cached Tools]:\n" + toolsList;
         if (!ragContext.isEmpty())
             prompt += "\n\n[RAG Context for Factual Accuracy]:\n" + ragContext;
@@ -1272,29 +1351,39 @@ public class JForgeAgent implements Callable<Integer> {
         return osName.toLowerCase(java.util.Locale.ROOT).contains("win");
     }
 
-    private List<String> listCachedTools() {
-        try (Stream<Path> stream = Files.list(TOOLS_DIR)) {
-            return stream
-                    .filter(p -> p.toString().endsWith(".java"))
+    /**
+     * Generic directory scanner: lists files matching {@code ext}, sorted by mtime
+     * DESC, limited to {@code limit}. Returns an empty list if the directory is
+     * absent or unreadable.
+     */
+    private List<Path> listArtifactsByMtime(Path dir, String ext, int limit) {
+        if (!Files.exists(dir)) return List.of();
+        try (Stream<Path> s = Files.list(dir)) {
+            return s.filter(p -> p.getFileName().toString().endsWith(ext))
                     .sorted(BY_MTIME_DESC)
-                    .limit(maxTools)
-                    .map(javaFile -> {
-                        Path metaPath = TOOLS_DIR.resolve(toMetaName(javaFile.getFileName().toString()));
-                        if (Files.exists(metaPath)) {
-                            try {
-                                return Files.readString(metaPath);
-                            } catch (IOException e) {
-                                logToFile("[ERROR] listCachedTools: failed to read metadata "
-                                        + metaPath.getFileName() + " — " + e.getMessage());
-                            }
-                        }
-                        return javaFile.getFileName().toString();
-                    })
-                    .collect(Collectors.toList());
+                    .limit(limit)
+                    .toList();
         } catch (IOException e) {
-            logToFile("[ERROR] listCachedTools: failed to list tools directory — " + e.getMessage());
+            logToFile("[ERROR] listArtifactsByMtime(" + dir + "): " + e.getMessage());
             return List.of();
         }
+    }
+
+    private List<String> listCachedTools() {
+        return listArtifactsByMtime(TOOLS_DIR, ".java", maxTools).stream()
+                .map(javaFile -> {
+                    Path metaPath = TOOLS_DIR.resolve(toMetaName(javaFile.getFileName().toString()));
+                    if (Files.exists(metaPath)) {
+                        try {
+                            return Files.readString(metaPath);
+                        } catch (IOException e) {
+                            logToFile("[ERROR] listCachedTools: failed to read metadata "
+                                    + metaPath.getFileName() + " — " + e.getMessage());
+                        }
+                    }
+                    return javaFile.getFileName().toString();
+                })
+                .collect(Collectors.toList());
     }
 
     private void runGarbageCollector() {
@@ -1302,48 +1391,60 @@ public class JForgeAgent implements Callable<Integer> {
         if (now - lastGcRun < 60_000)
             return; // max one GC run per minute
         lastGcRun = now;
-        try (Stream<Path> stream = Files.list(TOOLS_DIR)) {
-            long cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(maxToolAgeDays);
+        evictArtifacts(TOOLS_DIR, ".java", maxToolAgeDays, maxTools,
+                p -> TOOLS_DIR.resolve(toMetaName(p.getFileName().toString())), "tool");
+        evictArtifacts(WORKFLOWS_DIR, ".json", maxWorkflowAgeDays, maxWorkflows,
+                p -> WORKFLOWS_DIR.resolve(p.getFileName().toString().replace(".json", ".fail.json")), "workflow");
+    }
 
-            // age-based: partition into "delete" (too old) and "keep"
+    /**
+     * Generic age+count eviction: deletes files in {@code dir} matching
+     * {@code ext} that are older than {@code maxAgeDays}, then count-evicts the
+     * oldest if the remaining count exceeds {@code maxCount}. For each deleted
+     * file the sidecar returned by {@code sidecarFn} is also deleted when present.
+     */
+    private void evictArtifacts(Path dir, String ext, long maxAgeDays, int maxCount,
+            java.util.function.Function<Path, Path> sidecarFn, String label) {
+        if (!Files.exists(dir)) return;
+        try (Stream<Path> stream = Files.list(dir)) {
+            long cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(maxAgeDays);
+
             Map<Boolean, List<Path>> partitioned = stream
-                    .filter(p -> p.toString().endsWith(".java"))
+                    .filter(p -> p.getFileName().toString().endsWith(ext))
                     .collect(Collectors.partitioningBy(p -> {
                         try {
                             return Files.getLastModifiedTime(p).toMillis() < cutoff;
                         } catch (IOException e) {
-                            logToFile("[WARN] runGarbageCollector: could not read mtime for "
+                            logToFile("[WARN] evictArtifacts(" + label + "): could not read mtime for "
                                     + p.getFileName() + " — " + e.getMessage());
                             return false; // uncertain -> preserve
                         }
                     }));
 
-            List<Path> toDelete = new ArrayList<>(partitioned.get(true)); // defensive copy — partitioningBy mutability
-                                                                          // not guaranteed by spec
+            List<Path> toDelete = new ArrayList<>(partitioned.get(true));
             List<Path> remaining = partitioned.get(false);
 
-            // count-based: if still > maxTools, evict the oldest by mtime
-            if (remaining.size() > maxTools) {
+            if (remaining.size() > maxCount) {
                 toDelete.addAll(remaining.stream()
                         .sorted(BY_MTIME_DESC)
-                        .skip(maxTools)
+                        .skip(maxCount)
                         .toList());
             }
 
             toDelete.forEach(p -> {
                 try {
                     Files.deleteIfExists(p);
-                    Files.deleteIfExists(TOOLS_DIR.resolve(toMetaName(p.getFileName().toString())));
-                    status("@|bold,red \uD83D\uDDD1 [GARBAGE COLLECTOR] Deleting old unused tool: |@"
+                    if (sidecarFn != null) Files.deleteIfExists(sidecarFn.apply(p));
+                    status("@|bold,red \uD83D\uDDD1 [GARBAGE COLLECTOR] Deleting old unused " + label + ": |@"
                             + p.getFileName());
-                    logToFile("[GC] Deleted: " + p.getFileName());
+                    logToFile("[GC] Deleted " + label + ": " + p.getFileName());
                 } catch (IOException e) {
-                    logToFile("[ERROR] runGarbageCollector: failed to delete "
+                    logToFile("[ERROR] evictArtifacts(" + label + "): failed to delete "
                             + p.getFileName() + " — " + e.getMessage());
                 }
             });
         } catch (IOException e) {
-            logToFile("[ERROR] runGarbageCollector: failed to list tools directory — " + e.getMessage());
+            logToFile("[ERROR] evictArtifacts(" + label + "): failed to list directory — " + e.getMessage());
         }
     }
 
@@ -1355,54 +1456,28 @@ public class JForgeAgent implements Callable<Integer> {
     // ==================== AGENT INSTRUCTIONS ====================
 
     private static final String ROUTER_INSTRUCTION = """
-            You are a Logical CLI Tool Orchestrator System AND a highly intelligent Conversational Assistant.
-            Read the [Cached Tools], [Recent Chat History], and [RAG Search Results] carefully before deciding.
-
-            DECISION RULES — apply in this exact priority order:
-
-            1. EXECUTE       — A cached tool already solves the request.
-                               → 'EXECUTE: ToolName.java <args>'
-
-            2. EDIT          — A cached tool exists but needs a change or fix requested by the user.
-                               → 'EDIT: ToolName.java "change description"'
-
-            3. SEARCH        — You need a free API endpoint, library syntax, or current factual data
-                               not yet present in [RAG Search Results].
-                               → 'SEARCH: "<targeted query>"'
-
-            4. DELEGATE_CHAT — [RAG Search Results] already contains the DIRECT ANSWER to the user's question
-                               (a name, a date, a fact, an explanation). Use this ONLY when the search result
-                               itself IS the answer — not when it merely points to websites where the answer lives.
-                               Also use for pure conversation, concepts, and explanations that need no live data.
-                               → 'DELEGATE_CHAT'
-
-            5. CREATE        — The user wants a concrete VALUE (coordinates, price, temperature, score, status)
-                               AND [RAG Search Results] did not return that value directly — it only returned
-                               descriptions, links, or tracker websites. Build a tool that fetches the real data.
-                               If [RAG Search Results] contains a free API endpoint → use it immediately in CREATE.
-                               If no API is known yet → SEARCH first, then CREATE on the next iteration.
-                               → 'CREATE: Write a Java tool using <endpoint> to fetch <data> and print <output>'
-
-            THE KEY QUESTION after a SEARCH: "Does [RAG Search Results] contain the actual answer,
-            or does it only tell me WHERE to find the answer?"
-            — Contains the answer  (e.g. "Donald Trump is president since Jan 2025") → DELEGATE_CHAT
-            — Only points to sites (e.g. "track the ISS at isstracker.com")           → CREATE
-
-            REUSE OVER RECREATE: Before issuing CREATE, scan [Cached Tools] for a tool that uses the same
-            API or produces the same type of output. If such a tool exists and accepts arguments, issue
-            EXECUTE with the new arguments instead of creating a new tool.
-            Example: if WeatherFetcher.java exists and accepts a city name, run it for the new city — do NOT
-            create RioWeatherFetcher.java, SaoPauloWeatherFetcher.java, etc.
-
-            GENERIC BY DEFAULT: When issuing CREATE, always instruct the Coder to build a parameterized tool
-            that accepts the varying input as runtime arguments (args[0], args[1], ...).
-            Never ask the Coder to hardcode specific values (city names, coordinates, amounts, symbols, dates)
-            — those must be passed as arguments at execution time.
-
-            NEVER use DELEGATE_CHAT after creating or testing a tool. A tool that was just created
-            must be immediately EXECUTEd with the user's actual arguments — not described to the user.
-
             YOUR RESPONSE MUST BE EXACTLY ONE OF: 'EXECUTE: ...', 'CREATE: ...', 'EDIT: ...', 'SEARCH: ...' or 'DELEGATE_CHAT'.
+
+            ── FAST PATH ────────────────────────────────────────────────────────────
+            If the request is purely creative text (ASCII art, jokes, poetry, stories),
+            a direct knowledge answer with no external data needed, or purely conversational
+            — respond DELEGATE_CHAT immediately, without any further analysis.
+
+            ── ACTION PRIORITY (apply in order) ─────────────────────────────────────
+            1. EXECUTE  — a cached tool already handles this → use it
+            2. CREATE   — the task involves repeatable data fetching, computation, or file
+                          generation → build a reusable tool (even if SEARCH could answer once)
+            3. SEARCH   — you need current external data and no tool exists yet
+            4. DELEGATE_CHAT — pure conversation or knowledge question; no tool possible
+
+            TOOL PREFERENCE: tasks involving data fetching, calculations, chart/PDF/file
+            generation, or any repeatable operation MUST result in CREATE, not DELEGATE_CHAT.
+            A WeatherFetcher.java reused tomorrow is better than a one-off answer today.
+
+            TIME-SENSITIVITY RULE: Any question about "current" or "present" facts
+            (President, Weather, Prices, Status) MUST be preceded by a SEARCH if
+            [RAG Search Results] is empty or stale. Do NOT use DELEGATE_CHAT for
+            time-sensitive facts without corroborating search results.
             """;
 
     private static final String CODER_INSTRUCTION = """
@@ -1435,6 +1510,7 @@ public class JForgeAgent implements Callable<Integer> {
     private static final String ASSISTANT_INSTRUCTION = """
             You are JForge Assistant, a highly intelligent conversational interface within a CLI application.
             Your role is to strictly answer the user's questions or help them conceptually.
+            TEMPORAL ANCHOR: Always use the provided [Local System Clock] as the absolute ground truth for "today", "now", or any date-based logic. If your internal training data conflicts with the provided clock (e.g., regarding the current year, month, or public figures), prioritize the [Local System Clock] and conclude that the world state has changed since your last update.
             If [RAG Context for Factual Accuracy] search results are provided to you, USE THEM rigorously to ensure your factual answers are perfectly up-to-date and accurate. Do not hallucinate.
             Never generate entire Java code files. Code automation is handled by another agent.
             Keep your text crisp, beautifully formatted (Markdown is allowed here), and highly helpful.
@@ -1483,6 +1559,13 @@ public class JForgeAgent implements Callable<Integer> {
             Output:
             {"type":"SIMPLE"}
 
+            ── REUSE ─────────────────────────────────────────────────────────────────
+            Use {"type":"REUSE","id":"<filename>"} when [Recent Successful Workflows]
+            contains a workflow whose goal and steps closely match the current request.
+            The id must be the exact filename shown in the id: field of that entry.
+            Output:
+            {"type":"REUSE","id":"workflow_20260412_123758.json"}
+
             ── WORKFLOW ─────────────────────────────────────────────────────────────
             Use {"type":"WORKFLOW", ...} when ANY of the following is true:
               • A new tool must be created (not in [Cached Tools]) before it can be executed
@@ -1509,6 +1592,13 @@ public class JForgeAgent implements Callable<Integer> {
             - Use <<stepId>> in a goal to chain the output of a previous step
             - NEVER split "create a tool" and "execute the tool" into separate steps — the Router
               always creates AND executes in a single step. One deliverable = one step.
+
+            GENERIC STEP GOALS: Write step goals generically so the Router builds reusable tools.
+            Name steps after the action and data type, NOT the specific value from the request.
+              Bad : "Fetch the current price of Bitcoin in USD"
+              Good: "Fetch current prices for the given cryptocurrency symbols"
+            Generic goals produce generic tool names (CryptoPriceFetcher.java, not BitcoinFetcher.java).
+            The specific values (city, symbol, amount) belong in the EXECUTE arguments, not in the step goal.
 
             EXAMPLE A — SIMPLE: factual / conversational question
             Goal: "Who is the current president of the USA?"
